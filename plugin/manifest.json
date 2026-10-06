@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "org.otzaria.community.book-corrections",
   "name": "תיקוני ספרים",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "stability": "experimental",
   "description": "עריכת עותק של ספר והפיכת השינויים לדיווחי שגיאות לאוצריא.",
   "author": "Yehuda-Zakesh",
@@ -13,15 +13,15 @@
   "permissions": [
     "app.info.read", "app.user_email.read", "app.startup_contributions",
     "reader.open", "reader.context_menu", "reader.toolbar", "library.books.read", "library.content.read", "plugin.storage.read", "plugin.storage.write",
-    "ui.feedback", "events.subscribe:theme.changed"
+    "network.access", "events.subscribe:theme.changed"
   ],
-  "network": { "enabled": false, "allowlist": [] },
+  "network": { "enabled": true, "allowlist": ["https://otzaria.org/api/reportingerrors"] },
   "contributes": {
     "toolTab": { "title": "תיקוני ספרים", "iconName": "edit_24_regular", "defaultPinned": false },
     "startup": {
       "contextMenuItems": [{
         "id": "correct-book", "title": "העבר את הספר לתיקון", "icon": "edit_24_regular",
-        "contexts": ["reader-book", "reader-selection", "reader-page-shape-selection"], "openPlugin": true
+        "contexts": ["reader-selection", "reader-page-shape-selection"], "openPlugin": true
       }],
       "toolbarItems": [{ "id": "correct-book", "title": "העבר את הספר לתיקון", "icon": "edit_24_regular", "contexts": ["reader-text"], "openPlugin": true }]
     }

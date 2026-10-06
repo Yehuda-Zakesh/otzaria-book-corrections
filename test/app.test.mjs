@@ -27,14 +27,13 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
       _booted: true,
       on(event, handler) { events.set(event, handler); },
       call(method, args = {}) {
-        if (method === 'feedback.submitBookCorrection') return (async function () {
+        if (method === 'network.fetchStream') return (async function* () {
           let release;
           const response = new Promise(resolve => { release = resolve; });
           requests.push({ args: structuredClone(args), release });
           const status = await response;
-          return { success: true, data: status === 200
-            ? { status: 'sent', reportId: args.reportId }
-            : { status: 'failed', message: 'השליחה נכשלה (503). התיקון נשמר.' } };
+          yield { type: 'response', status };
+          yield { type: 'data', body: '{"success":true}' };
         })();
         let data = null;
         if (method === 'storage.get') data = storage.get(args.key) ?? null;
@@ -45,7 +44,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
         }
         else if (method === 'app.getUserEmail') { emailReads++; data = { email: savedEmail }; }
         else if (method === 'app.getTheme') data = { colorScheme: { primary: '#123456' } };
-        else if (method === 'library.getBookDetails') data = { title: 'ספר', source: 'library', type: 'text', lineCount: 2 };
+        else if (method === 'library.getBookDetails') data = { title: 'ספר', source: 'library', type: 'text', lineCount: 2, textSource: { key: 'otzaria-books' }, libraryPath: 'ספרים/ספר.txt' };
         else if (method === 'library.getBookContent') data = raw.slice(args.offset, args.offset + args.limit);
         else if (method === 'library.getBookToc') data = [{ text: 'פרק א', index: 0, level: 1 }];
         else if (method === 'reader.getSectionTextMap') data = { sourceText: raw.split('\n')[args.sectionIndex], currentRef: `פסקה ${args.sectionIndex + 1}` };
@@ -84,12 +83,18 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(storage.get('book-session').queue.length, 2);
     requests[0].release(200); await waitForRequests(2);
     assert.equal(storage.get('book-session').queue[0].sent, true);
-    assert.equal(requests[0].args.sectionIndex, 0);
-    assert.equal(requests[1].args.sectionIndex, 1);
-    assert.equal(requests[0].args.allowQueue, false);
-    assert.equal(requests[1].args.allowQueue, false);
-    assert.deepEqual(requests[0].args.snapshots, [{ index: 0, text: 'אב' }]);
-    assert.deepEqual(requests[1].args.snapshots, [{ index: 1, text: 'גד' }]);
+    const firstPayload = JSON.parse(requests[0].args.body), secondPayload = JSON.parse(requests[1].args.body);
+    assert.equal(firstPayload.line_number, 1);
+    assert.equal(secondPayload.line_number, 2);
+    assert.equal(firstPayload.source_folder, 'otzaria-books');
+    assert.equal(secondPayload.source_folder, 'otzaria-books');
+    assert.equal(firstPayload.file_path, 'ספרים/ספר.txt');
+    assert.equal(firstPayload.sender_email, 'user@example.com');
+    assert.equal(firstPayload.context_text, 'אב');
+    assert.equal(secondPayload.context_text, 'גד');
+    assert.equal(requests[0].args.method, 'POST');
+    assert.equal(requests[0].args.url, 'https://otzaria.org/api/reportingerrors');
+    assert.equal(firstPayload.schema_version, undefined, 'uses the existing free-text reporting contract');
     requests[1].release(503); await submission;
     const partial = storage.get('book-session');
     assert.deepEqual(partial.queue.map(item => item.sent), [true, false]);
@@ -102,13 +107,17 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(el('proposed').value, 'אם\nגה');
     assert.equal(el('send').disabled, false);
     assert.deepEqual(storage.get('book-session'), partial);
+    savedEmail = 'updated@example.com';
     setup();
     await import('../plugin/app.js?fullbook-reload'); await settle();
     assert.equal(el('proposed').value, 'אם\nגה');
     assert.equal(el('proposed').readOnly, true);
     assert.equal(el('send').textContent, 'המשך שליחה');
     const retry = el('editor').fire('submit'); await waitForRequests(3);
-    assert.deepEqual(requests[1].args, requests[2].args, 'native retry keeps report ID and complete request');
+    assert.equal(requests[1].args.body, requests[2].args.body, 'direct retry keeps report ID and complete immutable body');
+    assert.equal(JSON.parse(requests[2].args.body).report_id, secondPayload.report_id);
+    assert.equal(JSON.parse(requests[2].args.body).sender_email, 'user@example.com', 'settings changes cannot mutate an already attempted report');
+    assert.equal(emailReads, 3, 'each submit reads current settings without adding an email dialog');
     await el('editor').fire('submit'); assert.equal(requests.length, 3);
     requests[2].release(200); await retry;
     assert.equal(storage.get('book-session').completed, true);

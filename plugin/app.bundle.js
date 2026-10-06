@@ -888,11 +888,9 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        const result = await call('feedback.submitBookCorrection', { ...item.request, allowQueue: false });
-        if (result?.status !== 'sent' && result?.status !== 'queued') throw new Error(result?.message ?? 'הדיווח לא נשלח.');
+        await sendReport(host, item.payload);
       } catch (error) {
-        if (error.code?.replace(/^error\./, '') === 'report_id_conflict') { item.request.reportId = newId(); item.payload.report_id = item.request.reportId; await persist(); }
-        if (/unknown method|not found|לא מוכר|unsupported|unknown.*action/i.test(error.message)) throw new Error('נדרש עדכון אוצריא עם ממשק הדיווח החדש. הטיוטה נשמרה.');
+        if (error.status === 409) { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
         throw error;
       }
       item.sent = true; sent++; await persist();
