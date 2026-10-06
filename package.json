@@ -1,0 +1,7 @@
+{
+  "name": "otzaria-book-corrections",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "node scripts/build.mjs", "dev": "node scripts/watch.mjs", "test": "node --test test/*.test.mjs", "test:browser": "node test/browser/smoke.mjs", "pack": "node scripts/pack.mjs" }
+}

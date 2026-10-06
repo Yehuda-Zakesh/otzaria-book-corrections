@@ -1,0 +1,8 @@
+upstream-otzaria/
+node_modules/
+dist/
+test/browser/chrome-profile*/
+test/browser/chrome-stderr*.log
+test/browser/*.png
+test/browser/*.log
+docs/*.log

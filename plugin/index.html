@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>תיקוני ספרים</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><span id="location"></span><button id="change-book" type="button" class="ghost" hidden>החלף ספר</button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
+  <main>
+    <p id="status" role="status" aria-live="polite">טוען…</p>
+    <button id="next-book" class="ghost" hidden>עבור לספר החדש</button>
+    <section id="empty" hidden>
+      <h1>תיקון ספר</h1>
+      <p>פתחו ספר טקסט ובחרו „העבר את הספר לתיקון” בלחיצה ימנית או בסרגל הספר.</p>
+      <div id="book-picker" hidden>
+        <label for="open-books">איזה ספר לייבא לתיקון?</label>
+        <select id="open-books" aria-label="ספרים פתוחים"></select>
+      </div>
+      <button id="load-current" type="button">טען את הספר הפתוח</button>
+      <button id="cancel-book-picker" type="button" class="ghost" hidden>חזור לספר</button>
+    </section>
+    <form id="editor" hidden>
+      <div class="editor-layout">
+        <aside class="book-navigation" aria-label="ניווט בספר">
+          <div class="nav-tabs" role="tablist" aria-label="ניווט בספר"><button id="nav-toc-tab" type="button" role="tab" aria-controls="toc-view" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg><span>ניווט</span></button><button id="nav-search-tab" type="button" role="tab" aria-controls="search-view" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>חיפוש</span></button></div>
+          <div id="toc-view" class="nav-view" role="tabpanel" aria-labelledby="nav-toc-tab">
+          <div class="nav-header"><strong id="nav-title">תוכן הספר</strong><button id="toc-expand" class="icon-button" type="button" aria-label="הרחב או כווץ את תוכן העניינים" title="הרחב או כווץ הכל"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></svg></button><button id="toc-search-toggle" class="icon-button" type="button" aria-label="חיפוש בתוכן העניינים" title="חיפוש בתוכן העניינים"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button></div>
+          <div id="toc-search-wrap" hidden><label for="toc-search" class="sr-only">חיפוש בתוכן העניינים</label><input id="toc-search" type="search" placeholder="חיפוש בתוכן העניינים"></div>
+          <nav id="toc-list" aria-label="תוכן העניינים"></nav>
+          <div class="section-jump" hidden><label for="section-number">פסקה</label><input id="section-number" type="number" min="1"><button id="go-section" type="button" class="ghost">עבור</button></div>
+          </div>
+          <div id="search-view" class="nav-view" role="tabpanel" aria-labelledby="nav-search-tab" hidden><div class="book-search-field"><label for="book-search" class="sr-only">חיפוש בספר</label><input id="book-search" type="search" placeholder="חיפוש בספר" autocomplete="off"></div><nav id="book-search-results" aria-label="תוצאות חיפוש בספר"></nav></div>
+        </aside>
+        <div class="book-editor"><label for="proposed" class="sr-only">הספר לתיקון</label><textarea id="proposed" dir="rtl" spellcheck="false"></textarea></div>
+      </div>
+      <footer hidden><button id="pause" type="button" class="ghost" hidden>עצור שליחה</button><button id="discard" type="button" class="ghost">ביטול התיקונים</button><span id="draft-status"></span></footer>
+    </form>
+  </main>
+  <script src="app.bundle.js"></script>
+</body>
+</html>
