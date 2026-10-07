@@ -1,5 +1,5 @@
 import { loadBook, MAX_BOOK_BYTES } from './book.js';
-import { sortLibraryTree } from './library-order.js';
+import { sortLibraryTree, filterLibraryTree } from './library-order.js';
 import { diffBook } from './changes.js';
 import { readNikudDisplay, projectNikud, applyDisplayEdit } from './text-display.js';
 import { sendReport } from './report.js';
@@ -685,11 +685,11 @@ async function initialize(boot) {
   render(); restoreView();
   if (!session) {
     message('טוען את הספרייה…');
-    libraryTree = sortLibraryTree(await call('library.getTree', { includeBooks: true }));
+    libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));
     if (chooserOpen) restoreView(); else renderLibrary();
     el('library-search').focus();
   } else {
-    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(tree); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
+    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(filterLibraryTree(tree)); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
   }
   message(results[2].status === 'rejected' ? librarySettingsPermissionMessage : '', results[2].status === 'rejected');
 }

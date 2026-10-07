@@ -21,3 +21,12 @@ export function sortLibraryTree(node, root = true) {
     books: [...(node.books ?? [])].sort((a, b) => libraryOrder(a) - libraryOrder(b))
   };
 }
+
+export function filterLibraryTree(node) {
+  if (!node) return node;
+  return { ...node,
+    books: (node.books ?? []).filter(book => book.source === 'library'),
+    categories: (node.categories ?? []).map(filterLibraryTree)
+      .filter(category => category.books.length || category.categories.length)
+  };
+}

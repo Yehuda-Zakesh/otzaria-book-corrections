@@ -867,6 +867,15 @@ function sortLibraryTree(node, root = true) {
   };
 }
 
+function filterLibraryTree(node) {
+  if (!node) return node;
+  return { ...node,
+    books: (node.books ?? []).filter(book => book.source === 'library'),
+    categories: (node.categories ?? []).map(filterLibraryTree)
+      .filter(category => category.books.length || category.categories.length)
+  };
+}
+
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, initialized, loading = false, sending = false, pause = false;
@@ -1543,11 +1552,11 @@ async function initialize(boot) {
   render(); restoreView();
   if (!session) {
     message('טוען את הספרייה…');
-    libraryTree = sortLibraryTree(await call('library.getTree', { includeBooks: true }));
+    libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));
     if (chooserOpen) restoreView(); else renderLibrary();
     el('library-search').focus();
   } else {
-    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(tree); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
+    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(filterLibraryTree(tree)); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
   }
   message(results[2].status === 'rejected' ? librarySettingsPermissionMessage : '', results[2].status === 'rejected');
 }

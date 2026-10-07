@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { sortLibraryTree } from '../plugin/library-order.js';
+import { sortLibraryTree, filterLibraryTree } from '../plugin/library-order.js';
 
 test('library order follows Otzaria root priorities and nested category/book metadata', () => {
   const tree = { categories: [
@@ -21,4 +21,13 @@ test('older hosts retain unknown metadata order while known root categories are 
   const tree = { categories: [{ title: 'חסידות' }, { title: 'משנה' }, { title: 'תנ"ך' }, { title: 'אחר א' }, { title: 'אחר ב' }] };
   assert.deepEqual(sortLibraryTree(tree).categories.map(c => c.title), ['תנ"ך', 'משנה', 'חסידות', 'אחר א', 'אחר ב']);
   assert.equal(sortLibraryTree(null), null);
+});
+
+test('filters non-library sources and prunes empty branches without mutating input', () => {
+ const tree={books:[{source:'library',title:'official'},{source:'user'},{source:'attached'},{source:'external'},{}],categories:[{title:'private',books:[{source:'user'}]},{title:'nested',categories:[{books:[{source:'library'}]}]}]};
+ const original=structuredClone(tree), filtered=filterLibraryTree(tree);
+ assert.deepEqual(filtered.books,[{source:'library',title:'official'}]);
+ assert.deepEqual(filtered.categories.map(c=>c.title),['nested']);
+ assert.equal(filtered.categories[0].categories[0].books.length,1);
+ assert.deepEqual(tree,original);
 });
