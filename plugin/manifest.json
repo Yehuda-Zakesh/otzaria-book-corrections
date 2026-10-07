@@ -8,7 +8,6 @@
   "author": "Yehuda-Zakesh",
   "homepage": "https://github.com/Yehuda-Zakesh/otzaria-book-corrections",
   "entrypoint": "index.html",
-  "icon": "icon.png",
   "minAppVersion": "0.9.98",
   "sdkVersion": "1.x",
   "permissions": [
