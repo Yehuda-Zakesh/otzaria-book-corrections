@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { writeFile } from 'node:fs/promises';
-const pages = await (await fetch('http://127.0.0.1:9227/json')).json();
+const pages = await (await fetch(`http://127.0.0.1:${process.env.CDP_PORT ?? 9227}/json`)).json();
 const ws = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
 await new Promise(resolve => ws.addEventListener('open', resolve, { once: true }));
 let id = 0;
@@ -23,16 +23,18 @@ window.mockReports = [];
 window.mockEmail = 'mock@example.com';
 window.mockLines = ['טקסט מקורי', 'פסקה שנייה'];
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
+if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify({success:true})}; })();
 return (async()=>{ let data = null;
 if(method==='app.getTheme') data=mockTheme;
 else if(method==='app.getUserEmail') data={email:window.mockEmail};
+else if(method==='ui.showConfirm') data={confirmed:window.mockConfirmClose===true};
+else if(method==='reader.getCurrentState') data={currentId:1,openTabs:[{id:1,bookId:'mock-book',book:'ספר בדיקה',source:'library',type:'text'},{id:2,bookId:'second-book',book:'ספר שני',source:'library',type:'text'}]};
 else if(method==='storage.get' && args.key==='book-session') data=window.mockStoredSession ?? null;
-else if(method==='storage.set' && args.key==='book-session') window.mockStoredSession=args.value;
-else if(method==='reader.getSectionTextMap') data={sourceText:mockLines[args.sectionIndex],currentRef:'פסקה '+(args.sectionIndex+1)};
-else if(method==='library.getBookContent') data=mockLines.join(String.fromCharCode(10)).slice(args.offset,args.offset+args.limit);
-else if(method==='library.getBookDetails') data={source:'library',type:'text',lineCount:2,title:'ספר בדיקה',libraryPath:'mock.txt'};
-else if(method==='library.getBookToc') data=[{text:'ראשית',index:0,level:1},{text:'המשך',index:1,level:1}];
-else if(method==='feedback.submitBookCorrection') { window.mockReports.push(args); data={status:'sent',reportId:args.reportId,correctionSupported:!args.forceFreeText && args.sectionIndex===args.endSectionIndex}; }
+else if(method==='storage.set' && args.key==='book-session') { window.mockWorkspace=args.value; window.mockStoredSession=args.value.sessions.find(item=>item.id===args.value.activeId); }
+else if(method==='reader.getSectionTextMap') data={sourceText:(args.bookId==='second-book'?window.secondLines:mockLines)[args.sectionIndex],currentRef:'פסקה '+(args.sectionIndex+1)};
+else if(method==='library.getBookContent') data=(args.bookId==='second-book'?window.secondLines:mockLines).join(String.fromCharCode(10)).slice(args.offset,args.offset+args.limit);
+else if(method==='library.getBookDetails') data={source:'library',type:'text',lineCount:args.bookId==='second-book'?window.secondLines.length:2,title:args.bookId==='second-book'?'ספר שני':'ספר בדיקה',libraryPath:args.bookId==='second-book'?'second.txt':'mock.txt'};
+else if(method==='library.getBookToc') data=args.bookId==='second-book'?[{text:'תחילת השני',index:0,level:1},{text:'אמצע השני',index:50,level:1}]:[{text:'ראשית',index:0,level:1},{text:'המשך',index:1,level:1}];
 else if(method.startsWith('network.')) throw new Error('Real reports forbidden in browser smoke');
 return {success:true,data}; })(); } };
 ` });
@@ -99,9 +101,9 @@ const submission = await evaluate(`({ status:document.getElementById('status').t
 assert.match(submission.status, /נשלחו בהצלחה/);
 assert.equal(submission.sendDisabled, true);
 assert.ok(submission.mockReports.length >= 2);
-assert.ok(submission.mockReports.some(report => report.sectionIndex === 0));
-assert.ok(submission.mockReports.some(report => report.sectionIndex === 1));
-assert.ok(submission.mockReports.every(report => report.allowQueue === false && report.snapshots.length > 0));
+assert.ok(submission.mockReports.some(report => report.line_number === 1));
+assert.ok(submission.mockReports.some(report => report.line_number === 2));
+assert.ok(submission.mockReports.every(report => report.report_id && report.error_details.includes('מוצע:')));
 const savedSession = await evaluate('window.mockStoredSession');
 await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.mockStoredSession = ${JSON.stringify(savedSession)};` });
 await call('Page.reload');
@@ -113,6 +115,60 @@ const restored = await evaluate(`({status:document.getElementById('status').text
 assert.equal(restored.status, '');
 assert.equal(restored.visible, true);
 assert.equal(restored.text, 'טקסט מתוקן ארוך\nפסקה מתוקנת');
+const waitFor = async (expression, label) => {
+  for (let i = 0; i < 120; i++) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 50)); }
+  throw new Error(`Timed out: ${label}`);
+};
+// Each tab must retain its draft, search state, selection and scroll position.
+await evaluate(`document.getElementById('proposed').value='טיוטת ספר ראשון'; document.getElementById('proposed').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('proposed').setSelectionRange(3,7); document.getElementById('nav-search-tab').click(); document.getElementById('book-search').value='טיוטת'; document.getElementById('book-search').dispatchEvent(new Event('input')); window.secondLines=Array.from({length:180},(_,i)=>'פסקה '+i+' '+('תוכן הספר השני '.repeat(20))); window.mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'second-book',id:2}});`);
+await waitFor(`document.getElementById('screen-title').textContent==='ספר שני' && !document.getElementById('proposed').readOnly`, 'second tab opens');
+assert.equal(await evaluate(`document.querySelectorAll('#book-tabs [role=tab]').length`), 2);
+await evaluate(`document.getElementById('proposed').value='תיקון שני '+document.getElementById('proposed').value; document.getElementById('proposed').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('toc-search').value='השני'; document.getElementById('toc-search').dispatchEvent(new Event('input')); document.getElementById('book-scroll').scrollTop=12000;`);
+await new Promise(resolve => setTimeout(resolve, 300));
+const secondPosition = await evaluate(`document.getElementById('book-scroll').scrollTop`);
+const firstTabPoint = await evaluate(`(()=>{const r=document.querySelector('#book-tabs .book-tab-title').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+await call('Input.dispatchMouseEvent', { type: 'mousePressed', ...firstTabPoint, button: 'left', clickCount: 1 });
+await call('Input.dispatchMouseEvent', { type: 'mouseReleased', ...firstTabPoint, button: 'left', clickCount: 1 });
+await waitFor(`document.getElementById('screen-title').textContent==='ספר בדיקה' && !document.getElementById('proposed').readOnly`, 'first tab restored');
+assert.equal(await evaluate(`document.getElementById('proposed').value`), 'טיוטת ספר ראשון');
+assert.equal(await evaluate(`document.getElementById('book-search').value`), 'טיוטת');
+assert.equal(await evaluate(`document.getElementById('search-view').hidden`), false);
+assert.deepEqual(await evaluate(`({start:document.getElementById('proposed').selectionStart,end:document.getElementById('proposed').selectionEnd})`), {start:3,end:7});
+// RTL: ArrowLeft selects the next tab, and keeps keyboard focus on the tab strip.
+await evaluate(`document.querySelector('#book-tabs [aria-selected=true]').focus();`);
+await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 });
+await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 });
+await waitFor(`document.getElementById('screen-title').textContent==='ספר שני' && !document.getElementById('proposed').readOnly`, 'keyboard tab navigation');
+assert.equal(await evaluate(`document.activeElement.getAttribute('role')`), 'tab');
+assert.ok(Math.abs(await evaluate(`document.getElementById('book-scroll').scrollTop`) - secondPosition) <= 1);
+assert.equal(await evaluate(`document.getElementById('toc-search').value`), 'השני');
+assert.equal(await evaluate(`window.mockWorkspace.sessions.find(s=>s.book.identity.bookId==='second-book').editedText.startsWith('תיקון שני ')`), true);
+const tabWorkspace = await evaluate('window.mockWorkspace');
+await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.secondLines=${JSON.stringify(await evaluate('window.secondLines'))};window.mockStoredSession=${JSON.stringify(tabWorkspace)};` });
+await call('Page.reload');
+await waitFor(`document.querySelectorAll('#book-tabs [role=tab]').length===2 && document.getElementById('screen-title').textContent==='ספר שני'`, 'all tabs survive reload');
+assert.ok(Math.abs(await evaluate(`document.getElementById('book-scroll').scrollTop`) - secondPosition) <= 1);
+const multiBookScreenshot = await call('Page.captureScreenshot', { format: 'png' });
+await writeFile(resolve('test/browser/plugin-tabs.png'), Buffer.from(multiBookScreenshot.data, 'base64'));
+await evaluate(`window.mockHandlers['theme.changed']({...mockTheme,mode:'dark',colorScheme:{...mockTheme.colorScheme,surface:'#141218',onSurface:'#e6e0e9',onSurfaceVariant:'#cac4d0',surfaceContainerHigh:'#2b2930',primary:'#d0bcff',onPrimary:'#381e72'}})`);
+assert.equal(await evaluate(`getComputedStyle(document.querySelector('#book-tabs .active')).backgroundColor`), 'rgb(43, 41, 48)');
+const darkScreenshot = await call('Page.captureScreenshot', {format:'png'});
+await writeFile(resolve('test/browser/plugin-tabs-dark.png'), Buffer.from(darkScreenshot.data, 'base64'));
+await call('Emulation.setDeviceMetricsOverride', {width:390,height:800,deviceScaleFactor:1,mobile:false});
+await new Promise(resolve=>setTimeout(resolve, 300));
+assert.equal(await evaluate(`document.documentElement.scrollWidth <= 390`), true, 'tabs and toolbar must fit a narrow viewport');
+assert.equal(await evaluate(`document.querySelectorAll('#book-tabs [role=tab]').length`), 2);
+assert.equal(await evaluate(`(window.mockWorkspace??window.mockStoredSession).sessions[1].editedText.startsWith('תיקון שני ')`), true);
+await call('Emulation.clearDeviceMetricsOverride');
+await evaluate(`window.mockHandlers['theme.changed'](mockTheme)`);
+await new Promise(resolve=>setTimeout(resolve, 300));
+// Cancellation must preserve the dirty tab. Confirming removes only that tab.
+await evaluate(`document.querySelectorAll('#book-tabs .book-tab-close')[1].click()`);
+await new Promise(resolve => setTimeout(resolve, 200));
+assert.equal(await evaluate(`document.querySelectorAll('#book-tabs [role=tab]').length`), 2);
+await evaluate(`window.mockConfirmClose=true;document.querySelectorAll('#book-tabs .book-tab-close')[1].click()`);
+await waitFor(`document.querySelectorAll('#book-tabs [role=tab]').length===1 && !document.getElementById('proposed').readOnly`, 'close confirmed tab');
+assert.equal(await evaluate(`document.getElementById('proposed').value`), 'טיוטת ספר ראשון');
 // Exercise the real DOM with a megabyte Hebrew book, not a fake textarea.
 await evaluate(`(()=>{
   const text=('פסקה ארוכה עם טקסט עברי לבדיקה '.repeat(20)+String.fromCharCode(10)).repeat(1800);
@@ -183,5 +239,5 @@ const layoutComparison = await evaluate(`(()=>{
   const fullMs=measure(text),chunkMs=measure(chunk); return {characters:text.length,fullMs,chunkMs,renderedCharacters:chunk.length};
 })()`);
 assert.equal(errors.length, 0, JSON.stringify(errors));
-console.log(JSON.stringify({ protocol:'file:', boot, emptyGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, exceptions:errors.length }, null, 2));
+console.log(JSON.stringify({ protocol:'file:', boot, emptyGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, tabs:{count:2,independentDrafts:true,scrollRestored:true,selectionRestored:true,keyboardFocus:true,reloadRestored:true,closeCancellation:true}, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, exceptions:errors.length }, null, 2));
 ws.close();

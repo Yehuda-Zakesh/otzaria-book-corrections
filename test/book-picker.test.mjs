@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-test('book chooser replaces content and navigation, cancellation preserves editor, dirty changes require explicit discard', async () => {
+test('book tabs preserve independent drafts, reuse open books, and confirm closing unsent changes', async () => {
   class Element {
     hidden = true; value = ''; textContent = ''; handlers = new Map(); children = [];
     classList = { toggle() {} }; style = { setProperty() {} };
@@ -13,6 +13,7 @@ test('book chooser replaces content and navigation, cancellation preserves edito
     fire(name) { return this.handlers.get(name)?.({ preventDefault() {} }); }
   }
   const elements = new Map(), loaded = [], storage = new Map();
+  let confirmClose = false, failSave = false;
   const content = { ראשון: 'תוכן הספר הראשון', שני: 'תוכן הספר השני' };
   const titles = { ראשון: 'ספר ראשון', שני: 'ספר שני' };
   const el = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -35,8 +36,12 @@ test('book chooser replaces content and navigation, cancellation preserves edito
     if (method === 'reader.getSectionTextMap') data = { sourceText: content[args.bookId] };
     if (method === 'library.getBookToc') data = [{ text: `כותרת ${args.bookId}`, index: 0, level: 1 }];
     if (method === 'storage.get') data = storage.get(args.key) ?? null;
-    if (method === 'storage.set') storage.set(args.key, structuredClone(args.value));
+    if (method === 'storage.set') {
+      if (failSave) return { success: false, error: { message: 'storage failed' } };
+      storage.set(args.key, structuredClone(args.value));
+    }
     if (method === 'storage.remove') storage.delete(args.key);
+    if (method === 'ui.showConfirm') data = { confirmed: confirmClose };
     return { success: true, data };
   } } };
   try {
@@ -86,22 +91,34 @@ test('book chooser replaces content and navigation, cancellation preserves edito
     await el('change-book').fire('click');
     el('open-books').value = 'id:1';
     await el('load-current').fire('click');
-    assert.equal(loaded.length, 3, 'choosing another book cannot overwrite dirty text');
-    assert.equal(el('proposed').value, 'תיקון שטרם נשלח');
-    assert.equal(el('next-book').hidden, false);
-    assert.equal(storage.get('book-session').book.identity.bookId, 'שני');
-    await el('next-book').fire('click');
-    assert.equal(loaded[3].bookId, 'ראשון');
+    assert.equal(loaded.length, 2, 'already-open books reuse their own drafts without reloading');
     assert.equal(el('proposed').value, content.ראשון);
     assert.equal(el('screen-title').textContent, titles.ראשון);
+    assert.equal(el('book-tabs').children.length, 2);
+    const workspace = storage.get('book-session');
+    assert.equal(workspace.schemaVersion, 2);
+    assert.equal(workspace.sessions.find(item => item.book.identity.bookId === 'שני').editedText, 'תיקון שטרם נשלח');
+    const secondTab = () => el('book-tabs').children[0].children[0];
+    await secondTab().fire('click');
+    assert.equal(el('proposed').value, 'תיקון שטרם נשלח');
+    failSave = true;
+    await el('book-tabs').children[1].children[0].fire('click');
+    assert.equal(el('proposed').value, 'תיקון שטרם נשלח', 'failed save must prevent tab switching');
+    failSave = false;
+    await el('book-tabs').children[0].children[1].fire('click');
+    assert.equal(el('book-tabs').children.length, 2, 'canceling close preserves unsent draft');
+    confirmClose = true;
+    await el('book-tabs').children[0].children[1].fire('click');
+    assert.equal(el('book-tabs').children.length, 1);
+    assert.equal(el('proposed').value, content.ראשון);
     await el('discard').fire('click');
     tabs = [tabs[0]];
     await el('load-current').fire('click');
-    assert.equal(loaded[4].bookId, 'ראשון');
+    assert.equal(loaded[2].bookId, 'ראשון');
     await el('discard').fire('click');
     tabs = [{ type: 'pdf', source: 'library', bookId: 'סריקה' }];
     await el('load-current').fire('click');
-    assert.equal(loaded.length, 5);
+    assert.equal(loaded.length, 3);
     assert.match(el('status').textContent, /אין ספרי טקסט/);
   } finally { delete globalThis.document; delete globalThis.window; }
 });

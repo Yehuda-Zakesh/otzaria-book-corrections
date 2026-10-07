@@ -95,7 +95,7 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
     mirror.remove();
     viewport.scrollTop = Math.max(0, tops[index] + anchorY);
   }
-  function setText(value, offset = 0) {
+  function setText(value, offset = 0, savedGeometry = null) {
     const previousText = text, previousWidth = width, previousLineHeight = lineHeight;
     const previous = new Map(segments.map((segment, i) => [segment.start, { ...segment, height: heights[i] }]));
     text = value; segments = editorSegments(text); configure();
@@ -107,6 +107,9 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
       const lines = text.slice(segment.start, segment.end).replace(/\n$/, '').split('\n');
       return lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charsPerLine)), 0) * lineHeight;
     });
+    if (savedGeometry?.width === width && savedGeometry.lineHeight === lineHeight
+      && savedGeometry.length === text.length && savedGeometry.heights?.length === segments.length
+      && savedGeometry.heights.every(height => Number.isFinite(height) && height > 0)) heights = [...savedGeometry.heights];
     rebuildTops(); mount(indexAtOffset(offset), true);
   }
   function visibleOffset() {
@@ -138,14 +141,19 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
     });
   }, { passive: true });
   if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => {
-    if (editor.clientWidth === width || !segments.length) return;
+    if (!editor.clientWidth || editor.clientWidth === width || !segments.length) return;
+    const start = range.start + editor.selectionStart, end = range.start + editor.selectionEnd;
+    const focused = document.activeElement;
     const offset = visibleOffset(); setText(text, offset); scrollTo(offset);
+    editor.setSelectionRange(Math.max(0, Math.min(start - range.start, editor.value.length)), Math.max(0, Math.min(end - range.start, editor.value.length)));
+    if (focused !== editor) focused?.focus({ preventScroll: true });
   }).observe(viewport);
   viewport.addEventListener('click', event => {
     if (event.target === viewport || event.target === canvas) editor.focus({ preventScroll: true });
   });
   return {
     setText, scrollTo, visibleOffset,
+    get geometry() { return { width, lineHeight, length: text.length, heights: [...heights] }; },
     get range() { return range; },
     edited(value) {
       const offset = range.start + editor.selectionStart;

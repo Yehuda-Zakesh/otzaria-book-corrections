@@ -7,10 +7,10 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><span id="location"></span><button id="change-book" type="button" class="ghost" hidden>החלף ספר</button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
+  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><span id="location"></span><button id="change-book" type="button" class="ghost" hidden>פתח ספר נוסף</button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
+  <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
   <main>
     <p id="status" role="status" aria-live="polite">טוען…</p>
-    <button id="next-book" class="ghost" hidden>עבור לספר החדש</button>
     <section id="empty" hidden>
       <h1>תיקון ספר</h1>
       <p>פתחו ספר טקסט ובחרו „העבר את הספר לתיקון” בלחיצה ימנית או בסרגל הספר.</p>
@@ -21,7 +21,7 @@
       <button id="load-current" type="button">טען את הספר הפתוח</button>
       <button id="cancel-book-picker" type="button" class="ghost" hidden>חזור לספר</button>
     </section>
-    <form id="editor" hidden>
+    <form id="editor" role="tabpanel" hidden>
       <div class="editor-layout">
         <aside class="book-navigation" aria-label="ניווט בספר">
           <div class="nav-tabs" role="tablist" aria-label="ניווט בספר"><button id="nav-toc-tab" type="button" role="tab" aria-controls="toc-view" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg><span>ניווט</span></button><button id="nav-search-tab" type="button" role="tab" aria-controls="search-view" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>חיפוש</span></button></div>

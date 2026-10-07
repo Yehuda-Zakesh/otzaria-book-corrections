@@ -7,3 +7,7 @@ test/browser/*.png
 test/browser/*.log
 docs/*.log
 *.otzplugin
+.sentry-native/
+.worktrees/
+.qa-tools/
+test/browser/*.json

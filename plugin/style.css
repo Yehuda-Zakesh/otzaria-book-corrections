@@ -6,6 +6,20 @@ body { margin: 0; display: flex; flex-direction: column; font: 14px var(--font-u
 .topbar strong { font-size: 16px; font-weight: 600; white-space: nowrap; }
 #location { font-size: 12px; color: var(--onSurfaceVariant); overflow-wrap: anywhere; }
 #send { margin-inline-start: auto; white-space: nowrap; }
+#book-tabs { display: flex; flex-shrink: 0; height: 40px; padding-inline: 15px; overflow-x: auto; background: var(--surface); }
+.book-tab { position: relative; display: flex; align-items: center; flex: 0 1 220px; min-width: 100px; margin: 4px 6px 0; padding-bottom: 4px; border-radius: 8px 8px 0 0; color: var(--onSurface); }
+.book-tab.active { background: var(--surfaceContainerHigh); z-index: 1; }
+.book-tab:hover:not(.active) { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
+.book-tab.active::before, .book-tab.active::after { content: ''; position: absolute; bottom: 0; width: 15px; height: 15px; pointer-events: none; }
+.book-tab.active::before { left: -15px; border-bottom-right-radius: 15px; box-shadow: 5px 5px 0 5px var(--surfaceContainerHigh); }
+.book-tab.active::after { right: -15px; border-bottom-left-radius: 15px; box-shadow: -5px 5px 0 5px var(--surfaceContainerHigh); }
+button.book-tab-title { flex: 1; min-width: 0; min-height: 32px; padding: 4px 8px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; background: transparent; color: inherit; font-weight: 400; text-align: start; }
+.book-tab.active .book-tab-title { font-weight: 600; }
+button.book-tab-close { width: 24px; min-height: 24px; height: 24px; padding: 0; margin-inline-end: 6px; font-size: 20px; background: transparent; color: inherit; opacity: 0; }
+.book-tab.active .book-tab-close, .book-tab:hover .book-tab-close, .book-tab:focus-within .book-tab-close { opacity: 1; }
+button.book-tab-title:hover { background: transparent; }
+button.book-tab-close:hover { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
+@media (pointer: coarse) { button.book-tab-close { opacity: 1; } }
 main { padding: 24px; width: 100%; margin: 0; overflow: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 main.reading { padding: 0; overflow: hidden; }
 #empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
@@ -56,7 +70,7 @@ button.toc-chevron { min-height: 18px; padding: 0; background: transparent; bord
 .section-jump input { width: 70px; min-width: 0; padding: 8px; }
 .section-jump button { padding: 8px 12px; }
 .book-editor { flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
-#book-scroll { height: 100%; overflow: auto; overflow-anchor: none; overscroll-behavior: contain; }
+#book-scroll { height: 100%; overflow: auto; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable; }
 #editor-canvas { --book-padding: 24px; --book-inline-padding: 32px; position: relative; min-height: 100%; }
 #proposed { width: calc(100% - var(--book-inline-padding) * 2); position: absolute; inset-inline-start: var(--book-inline-padding); display: block; padding: 0; margin: 0; resize: none; overflow: hidden; border: 0; border-radius: 0; outline: none; background: transparent; color: var(--onSurface); caret-color: var(--primary); font-family: var(--font-main); font-size: var(--font-size); line-height: var(--line-height); white-space: pre-wrap; overflow-wrap: anywhere; }
 label { color: var(--onSurfaceVariant); }

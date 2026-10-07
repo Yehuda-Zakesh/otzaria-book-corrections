@@ -25,7 +25,7 @@ function sourcePieces(book, change) {
   for (let cursor = change.start; cursor < change.end;) {
     const section = sectionAt(book.sections, cursor);
     let end = Math.min(cursor + 8000, change.end);
-    // Each native request may validate at most 32 source paragraphs.
+    // Keep large proposals split into bounded source sections.
     const next = book.sections[section.index + 32];
     if (next) end = Math.min(end, next.start - 1);
     if (end < change.end && /[\uDC00-\uDFFF]/.test(book.originalText[end])) end--;
@@ -61,19 +61,7 @@ export async function prepareReports(session, changes, email, call, idFactory, o
         selection: { bookTitle: session.book.details.title ?? session.book.identity.bookId,
           bookId: session.book.identity.bookId, sectionIndex: first.index, currentRef: map.currentRef ?? '' }
       }, email);
-      const originalOffset = before.slice(0, part).reduce((total, text) => total + text.length, 0);
-      const partStart = Math.min(change.end, change.start + originalOffset);
-      const partEnd = Math.min(change.end, partStart + original.length);
-      const partFirst = sectionAt(session.book.sections, partStart);
-      const partLast = sectionAt(session.book.sections, partEnd);
-      const request = {
-        reportId: payload.report_id, ...session.book.identity,
-        sectionIndex: partFirst.index, endSectionIndex: partLast.index,
-        snapshots: session.book.sections.slice(partFirst.index, partLast.index + 1).map(section => ({ index: section.index, text: section.text })),
-        original, proposed, details: note, forceFreeText: count > 1,
-        ...(partFirst.index === partLast.index ? { sourceStart: partStart - partFirst.start, sourceEnd: partEnd - partFirst.start } : {})
-      };
-      queue.push({ payload, request, sent: false });
+      queue.push({ payload, sent: false });
     }
     onProgress(i + 1, changes.length);
   }

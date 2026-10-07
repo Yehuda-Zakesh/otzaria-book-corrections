@@ -1,0 +1,56 @@
+name: Publish to Otzaria
+
+on:
+  workflow_dispatch:
+    inputs:
+      reports_consent:
+        description: Agree to receive user reports at the store account email (required for first publish)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: otzaria-store-publish
+  cancel-in-progress: false
+
+jobs:
+  qa:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: qa
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check store secrets
+        env:
+          OTZARIA_USER: ${{ secrets.OTZARIA_USER }}
+          OTZARIA_PASSWORD: ${{ secrets.OTZARIA_PASSWORD }}
+        run: |
+          test -n "$OTZARIA_USER" || { echo 'Set the OTZARIA_USER repository secret'; exit 1; }
+          test -n "$OTZARIA_PASSWORD" || { echo 'Set the OTZARIA_PASSWORD repository secret'; exit 1; }
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: book-corrections-${{ github.sha }}
+          path: dist
+      - uses: Otzaria/otzaria-plugin-validator@64ee7c7806a03fcba16c111a7b6c3185e4d92804 # v1, 1.19.1
+        id: store
+        with:
+          path: dist/book-corrections-${{ needs.qa.outputs.version }}.otzplugin
+          publish: 'true'
+          fail-on-warnings: 'true'
+          app-version: '0.9.98'
+          otzaria-user: ${{ secrets.OTZARIA_USER }}
+          otzaria-password: ${{ secrets.OTZARIA_PASSWORD }}
+          screenshots: screenshots/main.png
+          reports-consent: ${{ inputs.reports_consent }}
+      - name: Store result
+        env:
+          PUBLISHED: ${{ steps.store.outputs.published }}
+          PENDING: ${{ steps.store.outputs.pending-approval }}
+        run: |
+          echo "Published: $PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pending store approval: $PENDING" >> "$GITHUB_STEP_SUMMARY"

@@ -1,5 +1,6 @@
 import { loadBook, MAX_BOOK_BYTES } from './book.js';
 import { diffBook } from './changes.js';
+import { sendReport } from './report.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
@@ -8,7 +9,8 @@ import { editorRange, replaceEditorRange, createContinuousEditor } from './edito
 import { buildTocTree, flattenTocTree, activeTocKey, ensurePathExpanded, setAllExpanded } from './toc-tree.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
-let session = null, pendingBook = null, initialized, loading = false, sending = false, pause = false;
+let session = null, initialized, loading = false, sending = false, pause = false;
+let sessions = [];
 let chooserOpen = false;
 let writes = Promise.resolve(), saveTimer, revision = 0;
 let unsaved = false;
@@ -40,14 +42,16 @@ function controls() {
   el('send').hidden = !session || chooserOpen;
   el('change-book').hidden = !session || chooserOpen;
   el('change-book').disabled = locked;
+  for (const button of el('book-tabs').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('cancel-book-picker').disabled = locked;
   el('send').disabled = locked || !session || session.completed || (!hasEdits() && !session.queue);
   el('send').textContent = sending ? 'שולח דיווחים…' : session?.queue ? 'המשך שליחה' : 'שלח דיווח';
-  for (const id of ['discard', 'next-book', 'load-current', 'open-books']) el(id).disabled = locked;
+  for (const id of ['discard', 'load-current', 'open-books']) el(id).disabled = locked;
   el('pause').hidden = !sending;
   el('discard').textContent = session?.completed ? 'סיים' : 'ביטול התיקונים';
 }
 function render() {
+  renderBookTabs();
   el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
   el('cancel-book-picker').hidden = !session || !chooserOpen;
   document.querySelector('main').classList.toggle('reading', !!session && !chooserOpen);
@@ -56,10 +60,89 @@ function render() {
   el('location').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? '';
   el('screen-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תיקוני ספרים';
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
-  if (session) showEditorRange(0);
+  if (session) showEditorRange(session.view?.visibleOffset ?? session.view?.selectionStart ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
   renderNavigation();
-  el('next-book').textContent = session && !session.completed ? 'בטל את התיקונים ועבור לספר החדש' : 'עבור לספר החדש';
   controls();
+}
+function renderBookTabs() {
+  const strip = el('book-tabs'); strip.hidden = !sessions.length;
+  const tabs = sessions.map(bookSession => {
+    const row = document.createElement('div'); row.className = `book-tab${bookSession.id === session?.id ? ' active' : ''}`;
+    const tab = document.createElement('button'); tab.type = 'button'; tab.className = 'book-tab-title';
+    tab.id = `book-tab-${bookSession.id}`; tab.textContent = bookSession.book.details.title ?? bookSession.book.identity.bookId;
+    tab.title = tab.textContent; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(bookSession.id === session?.id));
+    tab.setAttribute('aria-controls', 'editor'); tab.tabIndex = bookSession.id === session?.id ? 0 : -1;
+    tab.addEventListener('click', () => activateBook(bookSession.id).catch(error => message(error.message, true)));
+    tab.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const index = sessions.indexOf(bookSession);
+      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? sessions.length - 1
+        : (index + (event.key === 'ArrowLeft' ? 1 : -1) + sessions.length) % sessions.length;
+      activateBook(sessions[nextIndex].id, true).catch(error => message(error.message, true));
+    });
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'book-tab-close'; close.textContent = '×';
+    close.setAttribute('aria-label', `סגור ${tab.textContent}`); close.title = `סגור ${tab.textContent}`;
+    close.addEventListener('click', () => closeBook(bookSession.id).catch(error => message(error.message, true)));
+    row.append(tab, close); return row;
+  });
+  strip.replaceChildren(...tabs);
+  if (session) el(`book-tab-${session.id}`).scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  if (session) el('editor').setAttribute('aria-labelledby', `book-tab-${session.id}`);
+}
+function captureView() {
+  if (!session || chooserOpen) return;
+  session.view = { scrollTop: el('book-scroll').scrollTop ?? 0,
+    visibleOffset: continuousEditor?.visibleOffset() ?? visibleRange.start,
+    geometry: continuousEditor?.geometry,
+    selectionStart: visibleRange.start + (el('proposed').selectionStart ?? 0),
+    selectionEnd: visibleRange.start + (el('proposed').selectionEnd ?? 0),
+    tocExpanded: [...tocExpanded], tocSearch: el('toc-search').value,
+    bookSearch: el('book-search').value, searching: !el('search-view').hidden,
+    tocScrollTop: el('toc-list').scrollTop ?? 0 };
+}
+function restoreView() {
+  if (!session) return;
+  const view = session.view;
+  el('toc-search').value = view?.tocSearch ?? ''; el('book-search').value = view?.bookSearch ?? '';
+  tocBook = null; renderNavigation();
+  if (view?.tocExpanded) { tocExpanded = new Set(view.tocExpanded); renderNavigation(); }
+  el('toc-view').hidden = !!view?.searching; el('search-view').hidden = !view?.searching;
+  el('nav-toc-tab').setAttribute('aria-selected', String(!view?.searching));
+  el('nav-search-tab').setAttribute('aria-selected', String(!!view?.searching));
+  if (view?.searching) renderSearchResults();
+  if (view) {
+    el('book-scroll').scrollTop = view.scrollTop;
+    el('toc-list').scrollTop = view.tocScrollTop;
+    el('proposed').setSelectionRange?.(Math.max(0, view.selectionStart - visibleRange.start), Math.max(0, view.selectionEnd - visibleRange.start));
+  } else navigateTo(session.location ?? { sectionIndex: 0, offset: 0 });
+}
+async function activateBook(id, focusTab = false) {
+  if (loading || sending) return;
+  const next = sessions.find(item => item.id === id); if (!next) return;
+  loading = true; controls();
+  try {
+    captureView(); await persist(); await persist(next);
+    session = next; chooserOpen = false; render(); restoreView(); message();
+    loading = false; controls();
+    if (focusTab) el(`book-tab-${id}`).focus();
+    else el('proposed').focus({ preventScroll: true });
+  } finally { loading = false; controls(); }
+}
+async function closeBook(id) {
+  if (loading || sending) return;
+  const target = sessions.find(item => item.id === id); if (!target) return;
+  loading = true; controls();
+  try {
+    if (target.editedText !== (target.reportedText ?? target.book.originalText) || (target.queue && !target.completed)) {
+      const result = await call('ui.showConfirm', { title: 'סגירת ספר', content: 'בספר יש תיקונים שטרם נשלחו. סגירת הלשונית תמחק את הטיוטה שלו. לסגור?' });
+      if (!result?.confirmed) return;
+    }
+    captureView(); await persist();
+    const index = sessions.indexOf(target), remaining = sessions.filter(item => item.id !== id);
+    const next = session?.id === id ? remaining[Math.min(index, remaining.length - 1)] ?? null : session;
+    await persist(next, remaining); session = next; chooserOpen = false; render(); restoreView(); message();
+  } finally { loading = false; controls(); }
 }
 function renderNavigation() {
   if (!session) return;
@@ -128,7 +211,7 @@ function showEditorRange(offset) {
     continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
   }
   if (continuousEditor) {
-    continuousEditor.setText(session.editedText, offset); visibleRange = continuousEditor.range;
+    continuousEditor.setText(session.editedText, offset, session.view?.geometry); visibleRange = continuousEditor.range;
   } else {
     visibleRange = editorRange(session.editedText, offset);
     el('proposed').value = session.editedText.slice(visibleRange.start, visibleRange.end);
@@ -206,12 +289,19 @@ el('go-section').addEventListener('click', () => {
   const index = Number(el('section-number').value) - 1;
   if (session && Number.isInteger(index) && index >= 0 && index < session.book.sections.length) navigateTo({ sectionIndex: index, offset: 0 });
 });
-async function persist(value = session) {
+async function persist(value = session, books = sessions) {
   clearTimeout(saveTimer);
+  if (value === session) captureView();
   // Book data and report bodies are immutable; copy only mutable queue state.
-  const snapshot = value ? { ...value, queue: value.queue?.map(item => ({ ...item, payload: { ...item.payload }, request: item.request ? { ...item.request } : undefined })) ?? null } : null, savedRevision = revision;
+  const nextBooks = value ? [...books.filter(item => item.id !== value.id), value] : books.filter(item => item.id !== session?.id);
+  // Preserve tab order when replacing the active draft.
+  if (value && books.some(item => item.id === value.id)) nextBooks.splice(0, nextBooks.length, ...books.map(item => item.id === value.id ? value : item));
+  const snapshot = nextBooks.length ? { schemaVersion: 2, activeId: value?.id ?? nextBooks[0].id,
+    sessions: nextBooks.map(item => ({ ...item, view: item.view ? { ...item.view, tocExpanded: [...item.view.tocExpanded] } : undefined,
+      queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
   await writes;
+  sessions = nextBooks;
   if (savedRevision === revision) {
     el('draft-status').textContent = snapshot ? 'הטיוטה נשמרה' : '';
     await call('ui.setUnsavedChanges', { hasChanges: false }).catch(() => {});
@@ -235,14 +325,19 @@ async function openBook(identity) {
   if (loading || sending) throw new Error('המתינו לסיום הפעולה הנוכחית.');
   loading = true; controls();
   try {
+    captureView();
     if (session) await persist();
     const { location, ...bookIdentity } = identity;
+    const existing = sessions.find(item => item.book.identity.bookId === bookIdentity.bookId && item.book.identity.bookUid === bookIdentity.bookUid);
+    if (existing) {
+      await persist(existing); session = existing; chooserOpen = false; render(); restoreView(); message(); return;
+    }
     const book = await loadBook(call, bookIdentity, progress => message(progress.phase === 'content'
       ? `טוען את הספר… ${Math.round(progress.loaded / 1000)} אלפי תווים` : `ממפה פסקאות… ${progress.loaded} מתוך ${progress.total}`));
     book.toc = await call('library.getBookToc', book.identity).catch(() => []);
     const next = { id: newId(), book, editedText: book.originalText, queue: null, completed: false, location: location ?? { sectionIndex: 0, offset: 0 } };
-    await persist(next); session = next; chooserOpen = false; render(); message();
-    loading = false; controls(); navigateTo(session.location);
+    await persist(next); session = next; chooserOpen = false; render(); restoreView(); message();
+    loading = false; controls();
   } finally { loading = false; controls(); }
 }
 let openings = Promise.resolve();
@@ -251,9 +346,6 @@ function requestBook(event) {
   openings = openings.catch(() => {}).then(async () => {
     await initialized;
     const identity = identityFrom(event);
-    if (session && !session.completed && (hasEdits() || session.queue || sending)) {
-      pendingBook = identity; el('next-book').hidden = false; message('יש ספר עם תיקונים פתוחים. אפשר לשלוח אותם או לבטל ולעבור לספר החדש.'); return;
-    }
     await openBook(identity);
   }).catch(error => message(error.message, true));
 }
@@ -316,19 +408,13 @@ el('change-book').addEventListener('click', async () => {
 });
 el('cancel-book-picker').addEventListener('click', () => {
   if (loading || sending) return;
-  chooserOpen = false; pendingBook = null; el('next-book').hidden = true; render(); message();
-  navigateTo(session?.location ?? { sectionIndex: 0, offset: 0 });
-});
-el('next-book').addEventListener('click', async () => {
-  if (!pendingBook || loading || sending) return;
-  try { await openBook(pendingBook); pendingBook = null; el('next-book').hidden = true; } catch (error) { message(error.message, true); }
+  chooserOpen = false; render(); restoreView(); message();
 });
 el('discard').addEventListener('click', async () => {
   if (loading || sending) return;
   loading = true; controls();
   try {
-    await persist(null); session = null; render(); message();
-    if (pendingBook) { const identity = pendingBook; loading = false; await openBook(identity); pendingBook = null; el('next-book').hidden = true; }
+    await persist(null); session = sessions[0] ?? null; render(); restoreView(); message();
   } catch (error) { message(error.message, true); } finally { loading = false; controls(); }
 });
 el('pause').addEventListener('click', () => { pause = true; message('השליחה תיעצר לאחר הדיווח הנוכחי.'); });
@@ -353,12 +439,9 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        if (!item.request) throw new Error('הטיוטה הישנה אינה מכילה מיקומי מקור לתיקון ישיר. יש לטעון מחדש את הספר.');
-        const result = await call('feedback.submitBookCorrection', { ...item.request, allowQueue: false });
-        if (result?.status !== 'sent') throw new Error(result?.message ?? 'התיקון לא נשלח. הטיוטה נשמרה.');
-        item.correctionSupported = result.correctionSupported === true;
+        await sendReport(host, item.payload);
       } catch (error) {
-        if (error.code === 'error.report_id_conflict') { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
+        if (error.status === 409) { item.payload.report_id = newId(); await persist(); }
         throw error;
       }
       item.sent = true; sent++; await persist();
@@ -367,8 +450,7 @@ el('editor').addEventListener('submit', async event => {
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
     if (session.completed) {
-      const direct = session.queue.filter(item => item.correctionSupported).length;
-      message(`כל ${sent} הדיווחים נשלחו בהצלחה. ${direct} תיקונים ישירים, ${sent - direct} הצעות בלבד.`);
+      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`);
     }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
@@ -380,16 +462,16 @@ async function initialize(boot) {
   const results = await Promise.allSettled([call('app.getTheme'), call('storage.get', { key: 'book-session' })]);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
-  session = results[1].value;
-  if (session && !session.book.toc?.length) {
-    session.book.toc = await call('library.getBookToc', session.book.identity).catch(() => []);
-  }
-  render(); if (session) navigateTo(session.location ?? { sectionIndex: 0, offset: 0 });
+  const stored = results[1].value;
+  sessions = stored?.schemaVersion === 2 ? stored.sessions : stored ? [stored] : [];
+  session = sessions.find(item => item.id === stored?.activeId) ?? sessions[0] ?? null;
+  for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
+  render(); restoreView();
   message();
 }
 if (host) {
   host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook); host.on('reader.toolbar_item_clicked', requestBook);
-  host.on('plugin.suspended', () => { if (session) persist().catch(error => message(error.message, true)); });
+  host.on('plugin.suspended', () => { if (session) { captureView(); persist().catch(error => message(error.message, true)); } });
   host.on('plugin.boot', boot => { initialized ??= initialize(boot); initialized.catch(error => message(error.message, true)); });
   if (host._booted) { initialized ??= initialize(); initialized.catch(error => message(error.message, true)); }
 } else { el('empty').hidden = false; message('יש לפתוח את התוסף מתוך אוצריא.'); }
