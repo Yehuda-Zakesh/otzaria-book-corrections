@@ -55,7 +55,7 @@ function bytes(text) { return new TextEncoder().encode(text).length; }
  * Returned offsets are UTF-16 offsets into originalText, end exclusive.
  * Do not derive later section indexes from edited text; retain these anchors.
  */
-export async function loadBook(call, identity, onProgress = () => {}, { signal } = {}) {
+export async function loadBook(call, identity, onProgress = () => {}, { signal, includeRaw = false } = {}) {
   if (typeof identity?.bookId !== 'string' || !identity.bookId) throw new Error('חסר זיהוי של הספר.');
   const details = await request(call, 'library.getBookDetails', identity, signal);
   if (details?.source !== 'library' || details?.type !== 'text') throw new Error('אפשר לערוך ספרי טקסט מספריית אוצריא בלבד.');
@@ -114,5 +114,6 @@ export async function loadBook(call, identity, onProgress = () => {}, { signal }
   const originalText = lines.join('\n');
   if (bytes(originalText) > MAX_BOOK_BYTES) tooLarge();
   onProgress({ phase: 'done', loaded: sections.length, total: sections.length });
-  return { details, identity: bookIdentity, originalText, sections };
+  return { details, identity: bookIdentity, originalText, sections,
+    ...(includeRaw ? { rawLines: trusted ? raw.split('\n') : null } : {}) };
 }

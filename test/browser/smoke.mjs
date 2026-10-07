@@ -38,11 +38,12 @@ const restore=p=>{if(!Array.isArray(p))return book.originalText.slice(0,p.start)
 return {...state,book:{...book,sections:book.sections.map(s=>({...s,text:book.originalText.slice(s.start,s.end)}))},editedText:restore(editedPatch),...(reportedPatch?{reportedText:restore(reportedPatch)}:{})};
 })});
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
-if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); if(window.mockNetworkFails) throw new Error('Network unavailable'); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify(window.mockEmailFails ? {success:true,accepted:true,savedToDatabase:true,email_sent:false,duplicate:false} : {success:true})}; })();
+if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); if(window.mockNetworkFails) throw new Error('Network unavailable'); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify(window.mockEmailFails ? {success:true,accepted:true,savedToDatabase:true,email_sent:false,duplicate:false} : {success:true,correction_supported:window.mockCorrectionSupported!==false})}; })();
 return (async()=>{ let data = null;
 if(method==='app.getTheme') data=mockTheme;
 else if(method==='settings.get') data=window.mockLibraryMode;
 else if(method==='app.getUserEmail') data={email:window.mockEmail};
+else if(method==='app.getInfo') data={version:'0.9.98',buildNumber:'801',platform:'windows'};
 else if(method==='ui.showConfirm') data={confirmed:window.mockConfirmClose===true};
 else if(method==='reader.getCurrentState') data={currentId:1,openTabs:[{id:1,bookId:'mock-book',book:'ספר בדיקה',source:'library',type:'text'},{id:2,bookId:'second-book',book:'ספר שני',source:'library',type:'text'}]};
 else if(method==='library.getTree') data={title:'ספריית אוצריא',path:'/',categories:[{title:'חסידות',path:'/חסידות',order:0,categories:[],books:[{bookId:'extra',title:'נוסף',source:'library',type:'pdf'}]},{title:'תנ״ך',path:'/תנך',order:999,categories:[],books:[{id:99,bookUid:'id:99',bookId:'library-only',title:'ספר שאינו פתוח',source:'library',author:'מחבר לדוגמה',type:'text'},...Array.from({length:80},(_,i)=>({bookId:'other-'+i,title:'ספר נוסף '+i,source:'library',type:'pdf'}))]},{title:'Personal books',path:'/user',categories:[],books:[{bookId:'private',title:'Private book',source:'user',type:'text'}]}],books:[{bookId:'attached',title:'Attached book',source:'attached',type:'text'}]};
@@ -52,14 +53,14 @@ else if(method==='storage.set') { if(window.mockStorageDelay) await new Promise(
 else if(method==='storage.remove') {window.mockStorage.delete(args.key);if(args.key==='book-session'){window.mockIndex=null;window.mockStoredSession=null;window.mockWorkspace=null;}}
 else if(method==='reader.getSectionTextMap') {
 const sourceText=(args.bookId==='second-book'?window.secondLines:mockLines)[args.sectionIndex];
-data={sourceText,currentRef:'פסקה '+(args.sectionIndex+1)};
+data={sourceText}; // SDK may return no currentRef; resolve it from the book TOC.
 if(args.includeChars) {
 const tokens=[...new Intl.Segmenter('he',{granularity:'grapheme'}).segment(sourceText)].map(item=>({text:item.segment,normalizedText:window.mockHideNikud?item.segment.replace(/[\\u05b0-\\u05bc\\u05bf\\u05c1\\u05c2\\u05c4\\u05c5\\u05c7]/g,''):item.segment}));
 const start=Number(args.cursor??0);data.chars=tokens.slice(start,start+args.limit);data.hasMore=start+args.limit<tokens.length;data.nextCursor=data.hasMore?String(start+args.limit):null;
 }
 }
 else if(method==='library.getBookContent') data=(args.bookId==='second-book'?window.secondLines:mockLines).join(String.fromCharCode(10)).slice(args.offset,args.offset+args.limit);
-else if(method==='library.getBookDetails') data={source:'library',type:'text',lineCount:args.bookId==='second-book'?window.secondLines.length:mockLines.length,title:args.bookId==='second-book'?'ספר שני':'ספר בדיקה',libraryPath:args.bookId==='second-book'?'second.txt':'mock.txt'};
+else if(method==='library.getBookDetails') data={id:args.bookId==='second-book'?2:99,bookUid:args.bookId==='second-book'?'id:2':'id:99',source:'library',type:'text',lineCount:args.bookId==='second-book'?window.secondLines.length:mockLines.length,title:args.bookId==='second-book'?'ספר שני':'ספר בדיקה',libraryPath:args.bookId==='second-book'?'second.txt':'mock.txt'};
 else if(method==='library.getBookToc') data=args.bookId==='pointed-book'?[{text:'התחלה',index:0,level:1},{text:'אמצע',index:300,level:1},{text:'סוף',index:599,level:1}]:args.bookId==='second-book'?[{text:'תחילת השני',index:0,level:1},{text:'אמצע השני',index:50,level:1}]:[{text:'ראשית',index:0,level:1},{text:'המשך',index:1,level:1}];
 else if(method.startsWith('network.')) throw new Error('Real reports forbidden in browser smoke');
 return {success:true,data}; })(); } };
@@ -186,6 +187,10 @@ assert.ok(submission.mockReports.some(report => report.line_number === 1));
 assert.ok(submission.mockReports.some(report => report.line_number === 2));
 assert.ok(submission.mockReports.every(report => report.report_id && report.error_details.includes('מוצע:')));
 assert.ok(submission.mockReports.every(report => report.current_ref && report.error_details.includes(`מיקום: ${report.current_ref}\nמספר שורה במקור: ${report.line_number}`)));
+assert.ok(submission.mockReports.some(report => report.line_number === 1 && report.current_ref === 'ראשית'));
+assert.ok(submission.mockReports.some(report => report.line_number === 2 && report.current_ref === 'המשך'));
+assert.ok(submission.mockReports.every(report => report.schema_version === 2 && report.report_kind === 'text_correction' && report.correction));
+assert.match(submission.status, /2 הצעות תיקון מובנות אושרו באתר/);
 const savedSession = await evaluate('window.mockStoredSession');
 await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.mockStoredSession = ${JSON.stringify(savedSession)};` });
 await call('Page.reload');

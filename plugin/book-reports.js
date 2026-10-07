@@ -1,4 +1,16 @@
 import { buildReport } from './report.js';
+import { sourceText } from './book.js';
+import { correctionForSource, officialReportBookId } from './correction-source.js';
+// Like Otzaria's refFromIndex: retain the heading chain up to the source line.
+function reportTocRef(toc, index) {
+  const path = [];
+  for (const entry of toc ?? []) {
+    if (!Number.isInteger(entry.index) || entry.index < 0 || entry.index > index || !(entry.level > 0)) continue;
+    while (path.length && path.at(-1).level >= entry.level) path.pop();
+    path.push(entry);
+  }
+  return path.map(entry => String(entry.text ?? '').trim()).filter(Boolean).join(', ');
+}
 function sectionAt(sections, offset) {
   let lo = 0, hi = sections.length - 1;
   while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (sections[mid].start <= offset) lo = mid; else hi = mid - 1; }
@@ -34,8 +46,22 @@ function sourcePieces(book, change) {
   }
   return chunks;
 }
-export async function prepareReports(session, changes, email, call, idFactory, onProgress = () => {}) {
+export async function prepareReports(session, changes, email, call, idFactory, onProgress = () => {}, { sourceBook, client } = {}) {
   const maps = new Map(), queue = [];
+  const sourceBookId = officialReportBookId(sourceBook);
+  // Equal paragraph boundaries can be reported as independent, exact line edits.
+  // Adding/removing a newline remains one free-text proposal.
+  const reportChanges = changes.flatMap(change => {
+    const original = change.original.split('\n'), proposed = change.proposed.split('\n');
+    const first = sectionAt(session.book.sections, change.start);
+    const last = sectionAt(session.book.sections, Math.max(change.start, change.end - 1));
+    if (first.index === last.index || original.length <= 1 || original.length !== proposed.length) return [change];
+    let cursor = change.start;
+    return original.flatMap((text, index) => {
+      const start = cursor; cursor += text.length + 1;
+      return text === proposed[index] ? [] : [{ start, end: start + text.length, original: text, proposed: proposed[index] }];
+    });
+  });
   async function checked(section) {
     if (!maps.has(section.index)) {
       const map = await call('reader.getSectionTextMap', { ...session.book.identity, sectionIndex: section.index, layer: 'source' });
@@ -44,26 +70,45 @@ export async function prepareReports(session, changes, email, call, idFactory, o
     }
     return maps.get(section.index);
   }
-  for (let i = 0; i < changes.length; i++) {
-    const change = changes[i], first = sectionAt(session.book.sections, change.start);
+  for (let i = 0; i < reportChanges.length; i++) {
+    const change = reportChanges[i], first = sectionAt(session.book.sections, change.start);
     const last = sectionAt(session.book.sections, Math.max(change.start, change.end - 1));
     for (let index = first.index; index <= last.index; index++) await checked(session.book.sections[index]);
-    const map = await checked(first), before = sourcePieces(session.book, change), after = pieces(change.proposed);
+    const firstMap = await checked(first), raw = sourceBook?.rawLines?.[first.index];
+    const correction = sourceBookId != null && first.index === last.index && !change.proposed.includes('\n') &&
+      typeof raw === 'string' && sourceText(raw) === firstMap.sourceText ?
+      correctionForSource(raw, first.text, change.start - first.start, change.end - first.start, change.proposed) : null;
+    // A valid single-line correction can use the full 20,000-unit v2 limit.
+    // Chunk only the proposals that cannot be represented as one correction.
+    const before = correction ? [change.original] : sourcePieces(session.book, change);
+    const after = correction ? [change.proposed] : pieces(change.proposed);
     const count = Math.max(before.length, after.length);
+    let sourceCursor = change.start;
     for (let part = 0; part < count; part++) {
       const original = before[part] ?? '', proposed = after[part] ?? '';
+      const partStart = sourceCursor;
+      sourceCursor += original.length;
+      const partFirst = sectionAt(session.book.sections, partStart);
+      const map = await checked(partFirst);
       if (original === proposed) continue;
       const chunkNote = count > 1 ? `\nחלק ${part + 1} מתוך ${count} של תיקון רציף; יש לקרוא את החלקים לפי הסדר.` : '';
       const operation = change.original === '' ? 'הוספה במיקום המצוין. ' : change.proposed === '' ? 'מחיקה. ' : '';
-      const note = `${operation}תיקון ${i + 1} מתוך ${changes.length}. מיקום במקור: פסקה ${first.index + 1}${last.index !== first.index ? ` עד ${last.index + 1}` : ''}, היסט UTF-16 בספר ${change.start}–${change.end}.${chunkNote}`;
+      const note = `${operation}תיקון ${i + 1} מתוך ${reportChanges.length}. מיקום במקור: פסקה ${first.index + 1}${last.index !== first.index ? ` עד ${last.index + 1}` : ''}, היסט UTF-16 בספר ${change.start}–${change.end}.${chunkNote}`;
+      const reason = first.index !== last.index || change.proposed.includes('\n') ? 'השינוי משנה גבולות פסקאות.' :
+        sourceBookId == null || typeof raw !== 'string' ? 'אין זיהוי ומיפוי גולמי מאומת של פסקת המקור.' :
+        raw.length > 20000 || change.proposed.length > 20000 ? 'התיקון חורג ממגבלת האורך של תיקון מובנה.' :
+        'לא ניתן למפות את הטווח למקור הגולמי בלי לשנות תגיות עיצוב או לנחש מיקום.';
+      const reportNote = correction ? note : `${note}\nהצעה לבדיקה ידנית כדיווח חופשי: ${reason}`;
       const payload = await buildReport({ id: idFactory(), createdAt: new Date().toISOString(),
-        target: { original, line: contextPrefix(first.text) }, proposed, note, details: session.book.details,
+        target: { original, line: contextPrefix(partFirst.text) }, proposed, note: reportNote, details: session.book.details,
+        correction, sourceBookId, client,
         selection: { bookTitle: session.book.details.title ?? session.book.identity.bookId,
-          bookId: session.book.identity.bookId, sectionIndex: first.index, currentRef: map.currentRef ?? '' }
+          bookId: session.book.identity.bookId, sectionIndex: partFirst.index,
+          currentRef: map.currentRef?.trim() || reportTocRef(session.book.toc, partFirst.index) }
       }, email);
       queue.push({ payload, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
     }
-    onProgress(i + 1, changes.length);
+    onProgress(i + 1, reportChanges.length);
   }
   return queue;
 }

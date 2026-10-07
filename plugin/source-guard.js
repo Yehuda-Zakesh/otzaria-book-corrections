@@ -9,18 +9,19 @@ export function createSourceGuard(call) {
   function verifySource(book) {
     const existing = pending.get(book);
     if (existing) return existing;
-    const result = loadBook(call, book.identity).then(current => {
+    const result = loadBook(call, book.identity, undefined, { includeRaw: true }).then(current => {
       if (current.originalText !== book.originalText || current.sections.length !== book.sections.length ||
           current.sections.some((section, index) => section.start !== book.sections[index].start || section.end !== book.sections[index].end)) {
         changed();
       }
+      return current;
     });
     pending.set(book, result);
     result.finally(() => { if (pending.get(book) === result) pending.delete(book); }).catch(() => {});
     return result;
   }
   async function check(book, sectionIndices = []) {
-    await verifySource(book);
+    const current = await verifySource(book);
     // Full content comparisons do not prove internal DB section boundaries.
     // Recheck authoritative maps for every section that a queued report uses.
     for (const sectionIndex of new Set(sectionIndices)) {
@@ -28,6 +29,7 @@ export function createSourceGuard(call) {
       const map = await call('reader.getSectionTextMap', { ...book.identity, sectionIndex, layer: 'source' });
       if (map?.sourceText !== book.sections[sectionIndex].text) changed();
     }
+    return current;
   }
   // Restoration checks stay silent; submit always verifies again (or awaits a
   // check already in flight) before sending even an existing report queue.

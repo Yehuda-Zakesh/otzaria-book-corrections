@@ -53,6 +53,16 @@ test('embedded DB newlines use authoritative maps rather than shifting section i
   assert.equal(progress.at(-1).phase, 'done');
 });
 
+test('raw source is temporary, requested for reporting only and omitted for ambiguous DB boundaries', async () => {
+  const f = fixture('<b>אב</b>\nגד');
+  const book = await loadBook(f.call, { bookId: 'ספר' });
+  assert.equal('rawLines' in book, false);
+  const reportSource = await loadBook(f.call, { bookId: 'ספר' }, undefined, { includeRaw: true });
+  assert.deepEqual(reportSource.rawLines, ['<b>אב</b>', 'גד']);
+  const ambiguous = fixture('first\ninside\nlast', ['first\ninside', 'last']);
+  assert.equal((await loadBook(ambiguous.call, { bookId: 'ספר' }, undefined, { includeRaw: true })).rawLines, null);
+});
+
 test('a source disagreement triggers authoritative loading even with matching line count', async () => {
   const f = fixture('file first\nfile last', ['DB first', 'DB last']);
   assert.equal((await loadBook(f.call, { bookId: 'ספר' })).originalText, 'DB first\nDB last');

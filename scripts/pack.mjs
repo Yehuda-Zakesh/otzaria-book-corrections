@@ -14,6 +14,7 @@ function crc32(buffer) {
 await build();
 const names = ['manifest.json', 'index.html', 'style.css', 'app.bundle.js'];
 const manifest = JSON.parse(await readFile('plugin/manifest.json', 'utf8'));
+if (manifest.icon && !names.includes(manifest.icon)) names.push(manifest.icon);
 const local = [], central = [];
 let offset = 0;
 for (const name of names) {

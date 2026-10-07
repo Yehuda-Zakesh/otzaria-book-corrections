@@ -48,7 +48,8 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
         else if (method === 'settings.get') data = 'grid';
       else if (method === 'library.getTree') data = { title: 'ספריית אוצריא', path: '/', categories: [], books: [] };
         else if (method === 'app.getTheme') data = { colorScheme: { primary: '#123456' } };
-        else if (method === 'library.getBookDetails') data = { title: 'ספר', source: 'library', type: 'text', lineCount: 2, textSource: { key: 'otzaria-books' }, libraryPath: 'ספרים/ספר.txt' };
+        else if (method === 'app.getInfo') data = { version: '0.9.98', buildNumber: '801', platform: 'windows' };
+        else if (method === 'library.getBookDetails') data = { id: 1, bookUid: 'id:1', title: 'ספר', source: 'library', type: 'text', lineCount: 2, textSource: { key: 'otzaria-books' }, libraryPath: 'ספרים/ספר.txt' };
         else if (method === 'library.getBookContent') data = raw.slice(args.offset, args.offset + args.limit);
         else if (method === 'library.getBookToc') data = [{ text: 'פרק א', index: 0, level: 1 }];
         else if (method === 'reader.getSectionTextMap') data = { sourceText: raw.split('\n')[args.sectionIndex], currentRef: `פסקה ${args.sectionIndex + 1}` };
@@ -92,6 +93,8 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(secondPayload.line_number, 2);
     assert.equal(firstPayload.book_title, 'ספר');
     assert.equal(firstPayload.selected_text, 'ב');
+    assert.equal(firstPayload.report_kind, 'text_correction');
+    assert.equal(firstPayload.correction.original_selection, 'ב');
     assert.match(firstPayload.error_details, /מוצע: ם/);
     requests[1].release(503); await submission;
     const partialWorkspace = storage.get('book-session'), partial = savedSession();
@@ -129,7 +132,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(savedSession().completed, true);
     assert.deepEqual(savedSession().queue.map(item => item.sent), [true, true]);
     assert.match(el('status').textContent, /כל 2 הדיווחים נשלחו/);
-    assert.match(el('status').textContent, /כהצעות תיקון לבדיקה ידנית/);
+    assert.match(el('status').textContent, /האתר לא אישר קליטה כתיקון מובנה/);
     assert.doesNotMatch(el('status').textContent, /העריכה נעולה/,'completion clears the lock explanation');
     assert.equal(el('send').disabled, true);
     assert.equal(el('proposed').readOnly, false, 'successful delivery allows another correction');

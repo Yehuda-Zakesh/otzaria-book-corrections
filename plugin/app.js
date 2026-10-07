@@ -2,7 +2,8 @@ import { loadBook, MAX_BOOK_BYTES } from './book.js';
 import { sortLibraryTree, filterLibraryTree } from './library-order.js';
 import { diffBook } from './changes.js';
 import { readNikudDisplay, projectNikud, applyDisplayEdit } from './text-display.js';
-import { sendReport } from './report.js';
+import { sendReport, reportDeliveryMessage } from './report.js';
+import { verifyQueuedCorrectionSources } from './correction-source.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
@@ -668,13 +669,17 @@ el('editor').addEventListener('submit', async event => {
     if (!email) { message('יש לעדכן מייל לפני השליחה בהגדרות התוכנה.', true); return; }
     if (new TextEncoder().encode(session.editedText).length > MAX_BOOK_BYTES) throw new Error('הטקסט המתוקן גדול מדי (מעל 10 MB).');
     await persist();
-    await sourceGuard.check(session.book, queuedSourceSections(session));
+    const sourceBook = await sourceGuard.check(session.book, queuedSourceSections(session));
+    verifyQueuedCorrectionSources(session.queue, sourceBook);
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
       const changes = diffBook(session.book.originalText, session.editedText).filter(change => !reported.has(JSON.stringify(change)));
       if (!changes.length) { message('לא נמצאו שינויים בספר.'); return; }
-      const queue = await prepareReports(session, changes, email, call, newId, (done, total) => message(`מכין דיווחים… ${done} מתוך ${total}`));
+      const info = await call('app.getInfo').catch(() => null);
+      const client = info && typeof info.version === 'string' && typeof info.platform === 'string' ?
+        { app_version: info.version + (info.buildNumber ? `+${info.buildNumber}` : ''), platform: info.platform } : null;
+      const queue = await prepareReports(session, changes, email, call, newId, (done, total) => message(`מכין דיווחים… ${done} מתוך ${total}`), { sourceBook, client });
       session.queue = queue; await persist();
     }
     let sent = session.queue.filter(item => item.sent).length;
@@ -682,7 +687,8 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        await sendReport(host, item.payload);
+        const response = await sendReport(host, item.payload);
+        item.correctionSupported = item.payload.report_kind === 'text_correction' ? response.correction_supported === true : false;
       } catch (error) {
         if (error.status === 409) { item.payload.report_id = newId(); await persist(); }
         throw error;
@@ -693,7 +699,7 @@ el('editor').addEventListener('submit', async event => {
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
     if (session.completed) {
-      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`, false, 3000);
+      message(reportDeliveryMessage(session.queue), false, 3000);
     }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
