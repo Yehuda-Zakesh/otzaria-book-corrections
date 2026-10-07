@@ -1,0 +1,42 @@
+name: Package plugin
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Test and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Check source and bundle
+        run: npm run check
+      - name: Run tests
+        run: npm test
+      - name: Package plugin
+        run: npm run pack
+      - name: Upload installation file
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: book-corrections
+          path: dist/*.otzplugin
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

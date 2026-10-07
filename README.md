@@ -42,6 +42,7 @@
 
 ## CI ופרסום ב-GitHub
 
+- **Package plugin**: ריצה נפרדת לאריזה בלבד, בכל push ל-main, PR אליו או ידנית. בודקת ואורזת את התוסף להורדה כ-artifact בשם `book-corrections` למשך 14 יום. אינה יוצרת Release, אינה משתמשת בסודות ואינה פונה לחנות אוצריא.
 - **CI**: בכל push ל-main, PR אליו או הפעלה ידנית. בדיקות ב-Windows וב-Linux עם Node 22 ו-24, QA בדפדפן, אימות רשמי של אוצריא מול גרסה 0.9.98 ואריזה. קובץ ההתקנה ותצלומי הבדיקה נשמרים כ-artifacts למשך 14 יום.
 - **Publish GitHub release**: ידנית דרך Actions או בדחיפת תג `v0.4.0` התואם לגרסת המניפסט. רצה קודם כל חבילת ה-CI, ורק לאחר הצלחה מתפרסם אותו artifact כ-Release. תג שאינו תואם לגרסה נדחה; Release קיים אינו נדרס.
 - **Publish to Otzaria**: ידנית דרך Actions, מענף main בלבד. מריצה CI ומשתמשת באותו קובץ שנבדק. יש להגדיר `OTZARIA_USER` ו-`OTZARIA_PASSWORD` ב-[Repository secrets](https://github.com/Yehuda-Zakesh/otzaria-book-corrections/settings/secrets/actions). בפרסום ראשון מצורף `screenshots/main.png`, ויש לסמן הסכמה לקבלת דיווחי משתמשים. פרסום ראשון ממתין לאישור מנהל החנות.
