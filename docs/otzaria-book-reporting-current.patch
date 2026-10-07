@@ -1,0 +1,1772 @@
+diff --git a/docs/plugin-sdk/API_REFERENCE.md b/docs/plugin-sdk/API_REFERENCE.md
+index 88217a4a2..a738a0d37 100644
+--- a/docs/plugin-sdk/API_REFERENCE.md
++++ b/docs/plugin-sdk/API_REFERENCE.md
+@@ -251,6 +251,7 @@ if (response.success) {
+ | `fs.revokeFolder` | 0.9.98 |
+ | `feedback.sendEmail` | 0.9.89 |
+ | `feedback.report` | 0.9.97 |
++| `feedback.submitBookCorrection` | 0.9.99 |
+ | `feedback.hasReporterEmail` | 0.9.97 |
+ | `history.list` | 0.9.89 |
+ | `history.listSearches` | 0.9.89 |
+@@ -3270,6 +3271,35 @@ const { data } = await Otzaria.call('feedback.report', {
+ 
+ **שגיאות אפשריות:** `error.invalid_params` — `details` חסר או ריק. `error.internal` — דחייה קבועה של השרת (HTTP 400/422), או מצב לא-מקוון כשהמשתמש כיבה את תור הדיווחים בהגדרות. דחייה קבועה אינה נכנסת לתור.
+ 
++### `feedback.submitBookCorrection`
++
++מגיש דיווח שגיאה בספר דרך `DirectErrorReportService` של אוצריא, באותו חוזה v2, תור והיסטוריית דיווחים של התוכנה. אינו משנה את טקסט הספר. דורש הרשאת `feedback.send_email`, המוצהרת במניפסט ומאושרת בידי המשתמש, וכתובת מייל שמורה בהגדרות אוצריא; אינו מקבל כתובת מהתוסף.
++
++גרסת המינימום של ה־API היא `0.9.99`. הוא זמין בבנייה הכוללת את ההרחבה; הוא אינו קיים במהדורת 0.9.98 הרשמית המקורית. בגרסה רשמית ללא התוספת מתקבלת שיטת API לא מוכרת.
++
++```js
++const result = await Otzaria.call('feedback.submitBookCorrection', {
++  reportId: 'stable-correction-id',
++  bookId: 'שם הספר', bookUid: 'id:42',
++  sectionIndex: 7,
++  snapshots: [{ index: 7, text: 'לפני המקור אחרי' }],
++  original: 'המקור', proposed: 'התיקון',
++  sourceStart: 5, sourceEnd: 10,
++  allowQueue: false
++});
++```
++
++- `reportId` הוא מזהה יציב באורך 1–160 תווים מתוך `[A-Za-z0-9_.:-]`. `details` אופציונלי ומוגבל ל־20,000 יחידות UTF-16.
++- זהות הספר דורשת `bookId` כמחרוזת; `bookUid` אופציונלי. כאשר נמסר UID, ההתאמה אליו מחמירה וללא חזרה לחיפוש לפי כותרת. ללא UID, הכותרת חייבת לזהות ספר יחיד.
++- `sectionIndex/endSectionIndex` הם אינדקסי מקור אפסיים; ברירת המחדל של הסיום היא פסקת ההתחלה. עד 32 פסקאות. `snapshots` מכסה את כולן ברצף, והטקסט חייב להתאים למקור הרשמי העדכני לאחר ניקוי HTML של אוצריא.
++- `original/proposed` נשמרים ללא נרמול, עד 20,000 יחידות UTF-16 כל אחד. הצעה ריקה היא מחיקה. `sourceStart/sourceEnd` הם טווח מקומי בתוך פסקה יחידה; יש להעביר את שניהם או להשמיט את שניהם. הוספה ריקה דורשת טווח מפורש כדי לבנות תיקון מובנה.
++- אוצריא בונה מיקום, מקור, גרסת ספרייה, digest ופרטי לקוח מהמידע שלה. תיקון חד־משמעי בפסקה אחת מקבל `text_correction` עם מקור HTML גולמי; טווח שאינו ממופה בבטחה או שינוי בין פסקאות מקבלים `free_text` v2 עם נוסח לפני/אחרי, בלי להמציא טווח DB. טווחי `sourceStart/sourceEnd` שנמסרו נשמרים גם בדיווח `free_text`.
++- נתמכים רק ספרי טקסט רשמיים ממסד הספרייה, ללא ספר אישי, מסד מצורף, קובץ חיצוני או מהדורה חלופית. גוף הדיווח מוגבל ל־256 KiB UTF-8.
++- `allowQueue` ברירת מחדל true. כאשר false, מצב מנותק או כשל רשת מחזירים `error.report_failed` ללא שמירה בתור. התוסף משאיר את הטיוטה וניסיון חוזר משתמש באותו `reportId`.
++- `forceFreeText: true` מגיש v2 חופשי גם כאשר טווח יחיד ניתן למיפוי. יש להשתמש בו בחלקים של תיקון גדול, כדי שלא ליצור הצעות שורה שלמה חלופיות עבור חלקי הוספה אחת. פירוט סדר החלקים נמצא ב־`details`.
++- תוצאה: `{status: 'sent'|'queued', reportId, nativeReportId, message, duplicate, correctionSupported}`. `queued` מעביר בעלות לשירות אוצריא; `correctionSupported` הוא null עד שיש אישור שרת. כשל או שינוי במקור מחזירים שגיאה ואינם מאשרים את התיקון.
++- `error.report_id_conflict` מציין התנגשות בתור המקומי או HTTP 409: יש ליצור `reportId` חדש לפני ניסיון נוסף. כשל זמני משתמש באותו מזהה ובאותו תוכן.
++
+ ### `feedback.hasReporterEmail`
+ **הרשאה:** אינה נדרשת — מוחזר ביט קיום בלבד, בלי הכתובת עצמה.
+ 
+@@ -5437,10 +5467,13 @@ await Otzaria.call('reader.addContextMenuItem', {
+   הטקסט המסומן ולפעול עליו בדף שלו.
+ - `type` יכול להיות `item`,‏ `submenu`,‏ `color-row` או `separator`
+ - תת־תפריט מקבל `children`; שורת צבעים מקבלת `colors` עם `id`,‏ `color`,‏ `label`,‏ `selected` ו־`icon` אופציונלי. כאשר `icon` קיים הוא מוצג במקום גוש הצבע ומתאים לפעולות קומפקטיות כמו מחק
+-- `contexts` הוא מערך ויכול להכיל את `reader-selection`, את `reader-page-shape-selection`, או את שניהם באותו פריט. מ-`0.9.97` נתמך גם `reader-highlight` (ראו למטה). ערכי `contexts` חייבים להיות חוקיים וייחודיים. פריט שלא מגדיר `contexts` מופיע בשני הקשרי הבחירה (כהתנהגות הרישום המקורית).
++- `contexts` הוא מערך ויכול להכיל את `reader-selection`, את `reader-page-shape-selection`, או את שניהם באותו פריט. מ-`0.9.97` נתמך גם `reader-highlight` (ראו למטה), ומ־`0.9.99` נתמך `reader-book` ללא סימון. ערכי `contexts` חייבים להיות חוקיים וייחודיים. פריט שלא מגדיר `contexts` מופיע בשני הקשרי הבחירה (כהתנהגות הרישום המקורית).
+ - ילד שלא מגדיר `contexts` יורש את המערך של אביו. ילד שמגדיר `contexts` במפורש מוצג רק בהקשרים שלו, ללא איחוד אוטומטי עם הקשר האב; ההקשרים המפורשים חייבים להיות תת־קבוצה של הקשרי האב.
+ - אפשר להגדיר `onClickEvent` או `onColorClickEvent` כאירוע מותאם אישית
+ 
++**פעולה ללא סימון — `reader-book` (מ־`0.9.99`):**
++אפשר לרשום `contexts: ['reader-book']` להצגת פעולה בלחיצה ימנית ללא סימון, בשני קוראי הטקסט: הקורא הרגיל וקורא צורת הדף. ה־payload כולל את זהות הספר ואת `sectionIndex` ו־`currentIndex` של הפסקה שנלחצה. בשדה `selection`, הערך `text` הוא מחרוזת ריקה, `start` ו־`end` הם `null`, ואין `sourceRange`. ברירות המחדל של פריט ללא `contexts` נשארות שני הקשרי הבחירה; ילדים ללא `contexts` יורשים את הקשרי האב גם עבור `reader-book`.
++
+ **בחירה חוצת־פסקאות — `selection.sections` (מ-`0.9.97`):**
+ כשהבחירה משתרעת על כמה פסקאות, ה־`selection` שנמסר לאירועי הלחיצה של
+ פריטי התפריט כולל מערך `sections` — איבר לכל פסקה, עם `sectionIndex`,
+diff --git a/docs/plugin-sdk/otzaria_plugin.d.ts b/docs/plugin-sdk/otzaria_plugin.d.ts
+index 8a861b590..d202bf111 100644
+--- a/docs/plugin-sdk/otzaria_plugin.d.ts
++++ b/docs/plugin-sdk/otzaria_plugin.d.ts
+@@ -1157,6 +1157,7 @@ export interface ReaderSectionContentChangedEvent {
+ }
+ 
+ export type ContextMenuContext =
++  | 'reader-book'
+   | 'reader-selection'
+   | 'reader-page-shape-selection'
+   /** Right-click on a plugin highlight, with or without an active selection.
+@@ -1908,6 +1909,31 @@ export interface ListInstalledFontsResult {
+   platform: string;
+ }
+ 
++export interface SubmitBookCorrectionParams {
++  reportId: string;
++  bookId: string;
++  bookUid?: string;
++  sectionIndex: number;
++  endSectionIndex?: number;
++  snapshots: Array<{ index: number; text: string }>;
++  original: string;
++  proposed: string;
++  sourceStart?: number;
++  sourceEnd?: number;
++  details?: string;
++  allowQueue?: boolean;
++  forceFreeText?: boolean;
++}
++
++export interface SubmitBookCorrectionResult {
++  status: 'sent' | 'queued';
++  reportId: string;
++  nativeReportId: string;
++  message: string;
++  duplicate: boolean;
++  correctionSupported: boolean | null;
++}
++
+ export type OtzariaMethod =
+   | 'app.getInfo'
+   | 'app.getTheme'
+@@ -2014,6 +2040,7 @@ export type OtzariaMethod =
+   | 'publishedData.remove'
+   | 'publishedData.listOwn'
+   | 'feedback.sendEmail'
++  | 'feedback.submitBookCorrection'
+   | 'feedback.report'
+   | 'feedback.hasReporterEmail'
+   | 'history.list'
+@@ -2164,6 +2191,11 @@ export interface OtzariaGlobal {
+     payload?: Record<string, unknown>
+   ): Promise<OtzariaResponse<InstalledPlugin[]>>;
+ 
++  call(
++    method: 'feedback.submitBookCorrection',
++    payload: SubmitBookCorrectionParams
++  ): Promise<OtzariaResponse<SubmitBookCorrectionResult>>;
++
+   /**
+    * Call a Host API method.
+    *
+diff --git a/docs/plugin-sdk/spec.json b/docs/plugin-sdk/spec.json
+index 849b2cbfa..2a7ba0607 100644
+--- a/docs/plugin-sdk/spec.json
++++ b/docs/plugin-sdk/spec.json
+@@ -100,6 +100,7 @@
+     "feedback.hasReporterEmail",
+     "feedback.report",
+     "feedback.sendEmail",
++    "feedback.submitBookCorrection",
+     "fonts.listInstalled",
+     "fonts.resolveFamilies",
+     "fs.abortBinaryWrite",
+@@ -262,6 +263,7 @@
+     "database.listSources": "database.read",
+     "database.query": "database.read",
+     "feedback.sendEmail": "feedback.send_email",
++    "feedback.submitBookCorrection": "feedback.send_email",
+     "fonts.listInstalled": "app.info.read",
+     "fonts.resolveFamilies": "app.info.read",
+     "fs.abortBinaryWrite": "fs.user_files.write",
+@@ -410,6 +412,7 @@
+     "feedback.hasReporterEmail": "0.9.97",
+     "feedback.report": "0.9.97",
+     "feedback.sendEmail": "0.9.89",
++    "feedback.submitBookCorrection": "0.9.99",
+     "fonts.listInstalled": "0.9.97",
+     "fonts.resolveFamilies": "0.9.97",
+     "fs.abortBinaryWrite": "0.9.97",
+diff --git a/lib/core/user_state/pending_report_store.dart b/lib/core/user_state/pending_report_store.dart
+index 2618f8880..7652f4c41 100644
+--- a/lib/core/user_state/pending_report_store.dart
++++ b/lib/core/user_state/pending_report_store.dart
+@@ -41,6 +41,39 @@ class PendingReportStore {
+     return db.lastInsertRowId;
+   }
+ 
++  Future<Map<String, dynamic>> addIfAbsent(
++    String kind,
++    Map<String, dynamic> payload,
++  ) async {
++    final db = await _database.database;
++    final encoded = jsonEncode(payload);
++    db.execute('BEGIN IMMEDIATE');
++    try {
++      final rows = db.select(
++        "SELECT payload_json FROM pending_reports "
++        r"WHERE kind = ? AND json_extract(payload_json, '$.id') = ? LIMIT 1",
++        [kind, payload['id']],
++      );
++      if (rows.isNotEmpty) {
++        final stored =
++            jsonDecode(rows.single['payload_json'] as String)
++                as Map<String, dynamic>;
++        db.execute('COMMIT');
++        return stored;
++      }
++      db.execute(
++        'INSERT INTO pending_reports (kind, payload_json, created_at) '
++        'VALUES (?, ?, ?)',
++        [kind, encoded, DateTime.now().millisecondsSinceEpoch],
++      );
++      db.execute('COMMIT');
++      return payload;
++    } catch (_) {
++      db.execute('ROLLBACK');
++      rethrow;
++    }
++  }
++
+   Future<List<PendingReport>> listByKind(String kind) async {
+     final db = await _database.database;
+     final rows = db.select(
+diff --git a/lib/plugins/bridge/plugin_bridge_adapter.dart b/lib/plugins/bridge/plugin_bridge_adapter.dart
+index b7404cd12..7edec9ece 100644
+--- a/lib/plugins/bridge/plugin_bridge_adapter.dart
++++ b/lib/plugins/bridge/plugin_bridge_adapter.dart
+@@ -118,6 +118,13 @@ import 'package:otzaria/plugins/services/plugin_file_download_service.dart';
+ import 'package:otzaria/plugins/services/plugin_install_report_service.dart';
+ import 'package:otzaria/plugins/services/plugin_store_link_parser.dart';
+ import 'package:otzaria/plugins/services/plugin_report_service.dart';
++import 'package:otzaria/plugins/services/plugin_book_correction_service.dart';
++import 'package:otzaria/services/direct_error_report_service.dart';
++import 'package:otzaria/models/direct_error_report.dart';
++import 'package:otzaria/services/data_collection_service.dart';
++import 'package:otzaria/data/data_providers/book_database_resolver.dart';
++import 'package:otzaria/data/data_providers/db_read_worker.dart';
++import 'package:otzaria/data/data_providers/sqlite_data_provider.dart';
+ import 'package:otzaria/core/app_paths.dart';
+ import 'package:otzaria/plugins/services/plugin_fs_service.dart';
+ import 'package:otzaria/plugins/services/plugin_file_server.dart';
+@@ -672,8 +679,10 @@ class PluginBridgeAdapter {
+     PluginFileServer? fileServer,
+     PluginHighlightRegistry? highlightRegistry,
+     PluginReportService? reportService,
++    PluginBookCorrectionService? bookCorrectionService,
+   }) : _pluginRepo = pluginRepository ?? PluginRegistryRepository(),
+        _pluginReportService = reportService,
++       _pluginBookCorrectionService = bookCorrectionService,
+        _notificationService = notificationService ?? NotificationService(),
+        _databaseService = databaseService ?? PluginDatabaseService(),
+        _highlightRegistry =
+@@ -708,6 +717,17 @@ class PluginBridgeAdapter {
+   PluginReportService get _reportService =>
+       _pluginReportService ??= PluginReportService();
+ 
++  DirectErrorReportService? _directBookReportService;
++  PluginBookCorrectionService? _pluginBookCorrectionService;
++  PluginBookCorrectionService get _bookCorrectionService {
++    if (_pluginBookCorrectionService case final service?) return service;
++    final direct = _directBookReportService ??= DirectErrorReportService();
++    return _pluginBookCorrectionService = PluginBookCorrectionService(
++      senderEmail: () => direct.senderEmail,
++      deliver: direct.submitReport,
++    );
++  }
++
+   // שירות יצירת קיצורי דרך (shortcut.create) — מופע יחיד לכל adapter.
+   PluginShortcutService? _pluginShortcutService;
+   PluginShortcutService get _shortcutService =>
+@@ -809,6 +829,7 @@ class PluginBridgeAdapter {
+     _textReaderRawContent = null;
+     _textReaderProfile = null;
+     _textReaderDisplayContent = null;
++    unawaited(_directBookReportService?.closeHttpClient());
+     _bookIndexLibrary = null;
+     _booksById = const {};
+     _booksByTitle = const {};
+@@ -5521,6 +5542,8 @@ class PluginBridgeAdapter {
+     Map<String, dynamic> args,
+   ) async {
+     switch (action) {
++      case 'submitBookCorrection':
++        return _submitBookCorrection(args);
+       case 'sendEmail':
+         final to = args['to'] as String?;
+         final subject = args['subject'] as String?;
+@@ -5628,6 +5651,82 @@ class PluginBridgeAdapter {
+     }
+   }
+ 
++  Future<Map<String, dynamic>> _submitBookCorrection(
++    Map<String, dynamic> args,
++  ) async {
++    final bookId = args['bookId'];
++    final bookUid = args['bookUid'];
++    if (bookId is! String ||
++        bookId.trim().isEmpty ||
++        (bookUid != null && (bookUid is! String || bookUid.trim().isEmpty))) {
++      throw Exception('error.invalid_params: זהות הספר אינה תקינה.');
++    }
++    final library = await DataRepository.instance.library;
++    _ensureBookIndex(library);
++    final book = bookUid is String
++        ? _booksByUid[bookUid.trim()]
++        : switch (_booksByTitle[bookId]) {
++            [final book] => book,
++            _ => null,
++          };
++    if (book == null) {
++      throw Exception('error.not_found: הספר לא נמצא באופן חד־משמעי.');
++    }
++    if (book is! TextBook ||
++        !book.isOfficialLibraryBook ||
++        book.id == null ||
++        book.versionTitle != null) {
++      throw Exception(
++        'error.unsupported_context: ניתן לדווח רק על ספר טקסט רשמי.',
++      );
++    }
++    final resolved = await BookDatabaseResolver.resolveBookById(book.id!);
++    if (resolved == null ||
++        !resolved.source.isOfficial ||
++        resolved.book.isFileBacked) {
++      throw Exception(
++        'error.unsupported_context: מקור הספר אינו במסד הספרייה הרשמי.',
++      );
++    }
++    final information = await BookDetailsService().getBookInformation(book);
++    final package = await PackageInfo.fromPlatform();
++    final version = await DataCollectionService().readLibraryVersion();
++    return _bookCorrectionService.submit(
++      pluginId: plugin.pluginId,
++      args: args,
++      metadata: PluginBookReportMetadata(
++        bookId: resolved.book.id,
++        title: book.title,
++        sourceFolder: information.source ?? '',
++        filePath:
++            libraryDisplayPath(
++              information.fileDetails['נתיב הקובץ'] ?? '',
++            ) ??
++            '',
++        libraryVersion: version,
++        client: ReportClientInfo(
++          appVersion: '${package.version}+${package.buildNumber}',
++          platform: Platform.operatingSystem,
++        ),
++      ),
++      loadSource: (index) async {
++        final lines = await DbReadWorker.lines(
++          SqliteDataProvider.instance.dbPath,
++          resolved.book.id,
++          index,
++          index,
++        );
++        if (lines.length != 1) {
++          throw Exception('error.not_found: פסקת המקור אינה קיימת.');
++        }
++        return PluginBookReportSource(
++          lines.single.content,
++          heRef: lines.single.heRef,
++        );
++      },
++    );
++  }
++
+   // ----------------------------------------------------------------
+   // history.*
+   // ----------------------------------------------------------------
+diff --git a/lib/plugins/bridge/plugin_bridge_handler.dart b/lib/plugins/bridge/plugin_bridge_handler.dart
+index 8665b3a98..8be357ddb 100644
+--- a/lib/plugins/bridge/plugin_bridge_handler.dart
++++ b/lib/plugins/bridge/plugin_bridge_handler.dart
+@@ -152,7 +152,8 @@ class PluginBridgeHandler {
+       method == 'ui.print' ||
+       method == 'ui.exportPdf' ||
+       method == 'reader.printRange' ||
+-      method == 'feedback.report';
++      method == 'feedback.report' ||
++      method == 'feedback.submitBookCorrection';
+ 
+   Future<dynamic> _handleRpc(
+     List<dynamic> args, {
+@@ -441,6 +442,7 @@ class PluginBridgeHandler {
+     'publishedData.remove': 'published_data.write',
+     'publishedData.listOwn': 'published_data.write',
+     'feedback.sendEmail': 'feedback.send_email',
++    'feedback.submitBookCorrection': 'feedback.send_email',
+     // report נשלח רק אחרי אישור המשתמש בדיאלוג, וההסכמה שם היא גבול האבטחה;
+     // hasReporterEmail מחזירה ביט קיום בלבד, בלי הכתובת עצמה.
+     'feedback.report': noManifestPermission,
+diff --git a/lib/plugins/models/plugin_valid_permissions.dart b/lib/plugins/models/plugin_valid_permissions.dart
+index 9d24aa6e9..6f5f83bd8 100644
+--- a/lib/plugins/models/plugin_valid_permissions.dart
++++ b/lib/plugins/models/plugin_valid_permissions.dart
+@@ -48,6 +48,7 @@ const Map<String, String> apiCallToPermissionHint = {
+ 
+   // feedback.*
+   'feedback.sendEmail': 'feedback.send_email',
++  'feedback.submitBookCorrection': 'feedback.send_email',
+ 
+   // shortcut.*
+   'shortcut.create': 'ui.create_shortcut',
+diff --git a/lib/plugins/services/context_menu_registry.dart b/lib/plugins/services/context_menu_registry.dart
+index b12bc4ef4..aa7f14cd6 100644
+--- a/lib/plugins/services/context_menu_registry.dart
++++ b/lib/plugins/services/context_menu_registry.dart
+@@ -261,6 +261,7 @@ class ContextMenuRegistry extends ChangeNotifier {
+               const ['reader-selection', 'reader-page-shape-selection']
+         : List<String>.from(contextsValue as List);
+     const supportedContexts = {
++      'reader-book',
+       'reader-selection',
+       'reader-page-shape-selection',
+       'reader-highlight',
+diff --git a/lib/plugins/services/plugin_book_correction_service.dart b/lib/plugins/services/plugin_book_correction_service.dart
+new file mode 100644
+index 000000000..27b86a21e
+--- /dev/null
++++ b/lib/plugins/services/plugin_book_correction_service.dart
+@@ -0,0 +1,246 @@
++import 'dart:convert';
++
++import 'package:otzaria/models/direct_error_report.dart';
++import 'package:otzaria/services/direct_error_report_service.dart';
++import 'package:otzaria/utils/canonical_json.dart';
++import 'package:otzaria/widgets/smart_text/text_renderer_service.dart';
++
++class PluginBookReportSource {
++  final String rawText;
++  final String? heRef;
++
++  const PluginBookReportSource(this.rawText, {this.heRef});
++}
++
++class PluginBookReportMetadata {
++  final int bookId;
++  final String title;
++  final String sourceFolder;
++  final String filePath;
++  final String libraryVersion;
++  final ReportClientInfo client;
++
++  const PluginBookReportMetadata({
++    required this.bookId,
++    required this.title,
++    required this.sourceFolder,
++    required this.filePath,
++    required this.libraryVersion,
++    required this.client,
++  });
++}
++
++class PluginBookCorrectionService {
++  final String Function() senderEmail;
++  final Future<DirectReportDeliveryResult> Function(
++    DirectErrorReport, {
++    required bool allowQueue,
++  })
++  deliver;
++  final DateTime Function() now;
++
++  PluginBookCorrectionService({
++    required this.senderEmail,
++    required this.deliver,
++    DateTime Function()? now,
++  }) : now = now ?? DateTime.now;
++
++  Future<Map<String, dynamic>> submit({
++    required String pluginId,
++    required Map<String, dynamic> args,
++    required PluginBookReportMetadata metadata,
++    required Future<PluginBookReportSource> Function(int) loadSource,
++  }) async {
++    final id = args['reportId'];
++    final first = args['sectionIndex'];
++    final last = args['endSectionIndex'] ?? first;
++    final original = args['original'];
++    final proposed = args['proposed'];
++    final snapshots = args['snapshots'];
++    final details = args['details'] ?? '';
++    final allowQueue = args['allowQueue'] ?? true;
++    final forceFreeText = args['forceFreeText'] ?? false;
++    final start = args['sourceStart'];
++    final end = args['sourceEnd'];
++    if (id is! String ||
++        !RegExp(r'^[a-zA-Z0-9_.:-]{1,160}$').hasMatch(id) ||
++        first is! int ||
++        first < 0 ||
++        last is! int ||
++        last < first ||
++        last - first >= 32 ||
++        original is! String ||
++        proposed is! String ||
++        details is! String ||
++        allowQueue is! bool ||
++        forceFreeText is! bool ||
++        original == proposed ||
++        original.length > TextCorrection.maxTextLength ||
++        proposed.length > TextCorrection.maxTextLength ||
++        details.length > 20000 ||
++        snapshots is! List ||
++        snapshots.length != last - first + 1 ||
++        ((start == null) != (end == null)) ||
++        (start != null && (start is! int || end is! int || last != first))) {
++      throw Exception('error.invalid_params: נתוני התיקון אינם תקינים.');
++    }
++    if (utf8.encode(jsonEncode(args)).length >
++        DirectErrorReport.maxApiBodyBytes) {
++      throw Exception('error.invalid_params: בקשת התיקון גדולה מדי.');
++    }
++    final email = senderEmail().trim();
++    if (!DirectErrorReportService.isValidSenderEmail(email)) {
++      throw Exception(
++        'error.report_email_required: יש להגדיר כתובת מייל בהגדרות דיווח השגיאות באוצריא.',
++      );
++    }
++    final sources = <PluginBookReportSource>[];
++    final plainLines = <String>[];
++    for (var index = first; index <= last; index++) {
++      final snapshot = snapshots[index - first];
++      if (snapshot is! Map ||
++          snapshot['index'] != index ||
++          snapshot['text'] is! String) {
++        throw Exception('error.invalid_params: חסרה תמונת מקור רציפה.');
++      }
++      final source = await loadSource(index);
++      final plain = TextRendererService.stripHtml(source.rawText);
++      if (plain != snapshot['text']) {
++        throw Exception(
++          'error.source_changed: מקור הספר השתנה מאז פתיחת העורך.',
++        );
++      }
++      sources.add(source);
++      plainLines.add(plain);
++    }
++    final plain = plainLines.join('\n');
++    int? selectionStart;
++    if (start is int && end is int) {
++      if (start < 0 ||
++          end < start ||
++          end > plain.length ||
++          plain.substring(start, end) != original) {
++        throw Exception('error.invalid_params: הטווח אינו תואם לטקסט המקורי.');
++      }
++      selectionStart = start;
++    } else if (original.isNotEmpty) {
++      final index = plain.indexOf(original);
++      if (index < 0) {
++        throw Exception('error.invalid_params: התיקון אינו נמצא בתמונת המקור.');
++      }
++      if (plain.lastIndexOf(original) == index) selectionStart = index;
++    }
++    TextCorrection? correction;
++    final raw = sources.first.rawText;
++    if (!forceFreeText &&
++        first == last &&
++        raw.length <= TextCorrection.maxTextLength) {
++      if (raw == plain && original == plain && selectionStart == 0) {
++        correction = TextCorrection.wholeLine(
++          originalLine: raw,
++          proposedText: proposed,
++        );
++      } else if (original.isNotEmpty && selectionStart != null) {
++        final rawStart = raw == plain ? selectionStart : raw.indexOf(original);
++        final rawEnd = rawStart + original.length;
++        if (rawStart >= 0 &&
++            (raw == plain || raw.lastIndexOf(original) == rawStart) &&
++            (raw == plain ||
++                raw.lastIndexOf('<', rawStart) <=
++                    raw.lastIndexOf('>', rawStart)) &&
++            TextRendererService.stripHtml(raw.substring(0, rawStart)) ==
++                plain.substring(0, selectionStart) &&
++            TextRendererService.stripHtml(raw.substring(rawEnd)) ==
++                plain.substring(selectionStart + original.length)) {
++          correction = TextCorrection.selection(
++            originalLine: raw,
++            start: rawStart,
++            end: rawEnd,
++            proposedText: proposed,
++          );
++        }
++      } else if (original.isEmpty && raw == plain && start is int) {
++        final replacement =
++            raw.substring(0, start) + proposed + raw.substring(start);
++        if (replacement.length <= TextCorrection.maxTextLength) {
++          correction = TextCorrection.wholeLine(
++            originalLine: raw,
++            proposedText: replacement,
++          );
++        }
++      }
++    }
++    final fallback =
++        '--- הצעת תיקון ---\nמקור: $original\nמוצע: ${proposed.isEmpty ? '(מחיקה)' : proposed}';
++    final note = [
++      'תיקון מתוך תוסף $pluginId. פסקה ${first + 1}${last == first ? '' : ' עד ${last + 1}'}.',
++      if (correction == null && start is int)
++        'טווח מקור UTF-16: [$start, $end)',
++      if (details.isNotEmpty) details,
++    ].join('\n');
++    const fit = DirectErrorReport.fitDisplayField;
++    final report = DirectErrorReport(
++      id: '$pluginId:$id',
++      senderEmail: email,
++      schemaVersion: DirectErrorReport.currentSchemaVersion,
++      reportKind: correction == null
++          ? DirectErrorReportKind.freeText
++          : DirectErrorReportKind.textCorrection,
++      correction: correction,
++      subject: fit(
++        'הצעת תיקון: ${metadata.title}',
++        DirectErrorReport.maxSubjectLength,
++      ),
++      bookTitle: fit(metadata.title, DirectErrorReport.maxTitleOrRefLength),
++      currentRef: fit(
++        sources.first.heRef ?? '',
++        DirectErrorReport.maxTitleOrRefLength,
++      ),
++      lineNumber: first + 1,
++      selectedText: fit(original, DirectErrorReport.maxSelectedTextLength),
++      errorDetails: correction == null ? '$note\n\n$fallback' : note,
++      contextText: fit(
++        sources.map((s) => s.rawText).join('\n'),
++        DirectErrorReport.maxContextTextLength,
++      ),
++      filePath: metadata.filePath,
++      sourceFolder: metadata.sourceFolder,
++      libraryVersion: metadata.libraryVersion,
++      location: ReportLocation(
++        lineIndex: first,
++        bookId: metadata.bookId,
++        libraryBuildId: metadata.libraryVersion == 'unknown'
++            ? null
++            : metadata.libraryVersion,
++        heRef: sources.first.heRef,
++      ),
++      client: metadata.client,
++      createdAt: now().toUtc(),
++    );
++    try {
++      canonicalJsonEncode(report.toApiPayload());
++    } on ArgumentError {
++      throw Exception('error.invalid_params: התיקון מכיל תו טקסט פגום.');
++    }
++    if (report.exceedsApiBodyLimit) {
++      throw Exception('error.invalid_params: הדיווח גדול מדי לשליחה.');
++    }
++    final result = await deliver(report, allowQueue: allowQueue);
++    if (result.status == DirectReportDeliveryStatus.failed) {
++      final code = result.isIdConflict
++          ? 'error.report_id_conflict'
++          : 'error.report_failed';
++      throw Exception('$code: ${result.message}');
++    }
++    return {
++      'status': result.status.name,
++      'reportId': id,
++      'nativeReportId': report.id,
++      'message': result.message,
++      'duplicate': result.isDuplicate,
++      'correctionSupported': result.isSent
++          ? correction != null && !result.correctionNotSupported
++          : null,
++    };
++  }
++}
+diff --git a/lib/plugins/services/plugin_extended_validator.dart b/lib/plugins/services/plugin_extended_validator.dart
+index 734f6be46..70918cb41 100644
+--- a/lib/plugins/services/plugin_extended_validator.dart
++++ b/lib/plugins/services/plugin_extended_validator.dart
+@@ -171,6 +171,7 @@ const Set<String> _knownApiMethods = {
+   'fs.deleteEntry',
+   'fs.stat',
+   'feedback.sendEmail',
++  'feedback.submitBookCorrection',
+   'feedback.report',
+   'feedback.hasReporterEmail',
+   'history.list',
+@@ -365,6 +366,7 @@ const Map<String, String> _methodRequiredPermission = {
+   'fs.commitUserFileWrite': 'fs.user_files.write',
+   'fs.abortBinaryWrite': 'fs.user_files.write',
+   'feedback.sendEmail': 'feedback.send_email',
++  'feedback.submitBookCorrection': 'feedback.send_email',
+   'history.list': 'history.read',
+   'history.listSearches': 'history.read',
+   'history.clear': 'history.write',
+@@ -488,6 +490,7 @@ const Map<String, String> _methodMinVersion = {
+   'ui.exportPdf': '0.9.97',
+   'ui.setUnsavedChanges': '0.9.97',
+   'feedback.sendEmail': '0.9.89',
++  'feedback.submitBookCorrection': '0.9.99',
+   'feedback.report': '0.9.97',
+   'feedback.hasReporterEmail': '0.9.97',
+   'history.list': '0.9.89',
+diff --git a/lib/services/direct_error_report_service.dart b/lib/services/direct_error_report_service.dart
+index d6ed1258f..e2a898789 100644
+--- a/lib/services/direct_error_report_service.dart
++++ b/lib/services/direct_error_report_service.dart
+@@ -302,21 +302,31 @@ class DirectErrorReportService {
+   }
+ 
+   Future<DirectReportDeliveryResult> submitReport(
+-    DirectErrorReport report,
+-  ) async {
++    DirectErrorReport report, {
++    bool allowQueue = true,
++  }) async {
+     final directReportTargetLabel = _resolveDirectReportTargetLabel(report);
++    final existing = await _rowOf(pendingKind, report.id);
++    if (existing != null &&
++        _digestOrNull(_decode(existing)) != _digestOrNull(report)) {
++      return DirectReportDeliveryResult.failed(
++        ReportMessages.reportIdConflict,
++        isIdConflict: true,
++      );
++    }
+ 
+     if (_isOfflineMode) {
+-      if (!queueWhenOfflineEnabled) {
++      if (!allowQueue || !queueWhenOfflineEnabled) {
+         return DirectReportDeliveryResult.failed(
+           ReportMessages.offlineQueueDisabled,
+         );
+       }
+ 
+-      await _enqueueIfNeeded(
++      final conflict = await _enqueueIfNeeded(
+         report,
+         queueType: DirectErrorReportQueueType.automaticRetry,
+       );
++      if (conflict != null) return conflict;
+       return DirectReportDeliveryResult.queued(
+         ReportMessages.queuedOffline(directReportTargetLabel),
+       );
+@@ -356,10 +366,14 @@ class DirectErrorReportService {
+       );
+     }
+ 
+-    await _enqueueIfNeeded(
++    if (!allowQueue) {
++      return DirectReportDeliveryResult.failed(attemptResult.message);
++    }
++    final conflict = await _enqueueIfNeeded(
+       report,
+       queueType: DirectErrorReportQueueType.automaticRetry,
+     );
++    if (conflict != null) return conflict;
+     return DirectReportDeliveryResult.queued(
+       ReportMessages.queuedAfterFailure(directReportTargetLabel),
+     );
+@@ -464,18 +478,22 @@ class DirectErrorReportService {
+     return RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(normalized);
+   }
+ 
+-  Future<void> _enqueueIfNeeded(
++  Future<DirectReportDeliveryResult?> _enqueueIfNeeded(
+     DirectErrorReport report, {
+     required DirectErrorReportQueueType queueType,
+   }) async {
+-    if ((await _rowIdsOf(pendingKind, report.id)).isNotEmpty) {
+-      return;
+-    }
+-
+-    await _reports.add(
++    final stored = await _reports.addIfAbsent(
+       pendingKind,
+       report.copyWith(queueType: queueType).toJson(),
+     );
++    if (_digestOrNull(DirectErrorReport.fromJson(stored)) !=
++        _digestOrNull(report)) {
++      return DirectReportDeliveryResult.failed(
++        ReportMessages.reportIdConflict,
++        isIdConflict: true,
++      );
++    }
++    return null;
+   }
+ 
+   Future<void> _saveSentReport(
+diff --git a/lib/text_book/utils/reader_plugin_menu_entries.dart b/lib/text_book/utils/reader_plugin_menu_entries.dart
+index 843e0c068..d548ff14b 100644
+--- a/lib/text_book/utils/reader_plugin_menu_entries.dart
++++ b/lib/text_book/utils/reader_plugin_menu_entries.dart
+@@ -100,6 +100,22 @@ Map<String, dynamic> buildReaderSelectionPayload({
+   );
+ }
+ 
++Map<String, dynamic> buildReaderBookPayload({
++  required TextBookLoaded state,
++  required int paragraphIndex,
++}) => {
++  ...PluginBookIdentity.toJsonWithUid(state.book),
++  'bookTitle': state.book.title,
++  'currentBook': state.book.title,
++  'currentBookId': state.book.title,
++  'sectionIndex': paragraphIndex,
++  'currentIndex': paragraphIndex,
++  'currentRef': state.currentTitle,
++  'text': '',
++  'start': null,
++  'end': null,
++};
++
+ /// Plugin entries for the `reader-highlight` context: a right click on
+ /// highlighted text with no active selection. Empty unless the click at
+ /// [tapPosition] falls on a highlight in paragraph [paragraphIndex].
+@@ -145,12 +161,6 @@ List<AppContextMenuEntry> buildClickedHighlightPluginEntries({
+   return [const AppContextMenuEntry.divider(), ...entries];
+ }
+ 
+-/// The plugin section of a reader's main text context menu, for a right
+-/// click on paragraph [paragraphIndex] of [lines].
+-///
+-/// With a selection it holds the items of [selectionContext]; without one,
+-/// the items of a highlight under the click. [settings] is only computed when
+-/// there are plugin items to show.
+ List<AppContextMenuEntry> buildReaderPluginMenuEntries({
+   required RenderObject? root,
+   required TextBookLoaded state,
+@@ -171,7 +181,16 @@ List<AppContextMenuEntry> buildReaderPluginMenuEntries({
+   }
+   final renderSettings = settings();
+   if (!hasSelection) {
+-    return buildClickedHighlightPluginEntries(
++    final bookEntries = buildPluginContextMenuEntries(
++      records: items,
++      selection: buildReaderBookPayload(
++        state: state,
++        paragraphIndex: paragraphIndex,
++      ),
++      context: 'reader-book',
++      selectionActionDispatcher: pluginSelectionActionDispatcherOf(menuContext),
++    );
++    final highlightEntries = buildClickedHighlightPluginEntries(
+       root: root,
+       state: state,
+       rawText: lines[paragraphIndex],
+@@ -181,6 +200,11 @@ List<AppContextMenuEntry> buildReaderPluginMenuEntries({
+       pluginItems: items,
+       menuContext: menuContext,
+     );
++    return [
++      if (bookEntries.isNotEmpty) const AppContextMenuEntry.divider(),
++      ...bookEntries,
++      ...highlightEntries,
++    ];
+   }
+   final selection = buildReaderSelectionPayload(
+     state: state,
+diff --git a/test/core/user_state/window_session_and_reports_store_test.dart b/test/core/user_state/window_session_and_reports_store_test.dart
+index 7623acf16..e982085fa 100644
+--- a/test/core/user_state/window_session_and_reports_store_test.dart
++++ b/test/core/user_state/window_session_and_reports_store_test.dart
+@@ -49,6 +49,23 @@ void main() {
+   });
+ 
+   group('PendingReportStore', () {
++    test('הכנסה לפי מזהה שומרת תוכן ראשון ומפרידה בין סוגי דיווחים', () async {
++      final first = PendingReportStore(database: db);
++      final second = PendingReportStore(database: db);
++      final results = await Future.wait([
++        first.addIfAbsent('errors/pending', {'id': 'same', 'text': 'ראשון'}),
++        second.addIfAbsent('errors/pending', {'id': 'same', 'text': 'שני'}),
++      ]);
++      expect(results[0], results[1]);
++      expect(await first.countByKind('errors/pending'), 1);
++      final separate = await second.addIfAbsent('plugins/pending', {
++        'id': 'same',
++        'text': 'נפרד',
++      });
++      expect(separate['text'], 'נפרד');
++      expect(await first.countByKind('plugins/pending'), 1);
++    });
++
+     test('הוספה פר-שורה, רשימה לפי סוג, מחיקה לפי מזהה, קיצוץ', () async {
+       final store = PendingReportStore(database: db);
+       final first = await store.add('errors/pending', {'m': 1});
+diff --git a/test/plugins/bridge/plugin_bridge_book_correction_api_test.dart b/test/plugins/bridge/plugin_bridge_book_correction_api_test.dart
+new file mode 100644
+index 000000000..b079e1370
+--- /dev/null
++++ b/test/plugins/bridge/plugin_bridge_book_correction_api_test.dart
+@@ -0,0 +1,203 @@
++import 'package:flutter_settings_screens/flutter_settings_screens.dart';
++import 'package:flutter_test/flutter_test.dart';
++import 'package:mockito/mockito.dart';
++import 'package:otzaria/data/repository/data_repository.dart';
++import 'package:otzaria/history/bloc/history_bloc.dart';
++import 'package:otzaria/library/models/library.dart';
++import 'package:otzaria/models/book_source.dart';
++import 'package:otzaria/models/books.dart';
++import 'package:otzaria/navigation/bloc/navigation_bloc.dart';
++import 'package:otzaria/personal_notes/repository/personal_notes_repository.dart';
++import 'package:otzaria/plugins/bridge/plugin_bridge_adapter.dart';
++import 'package:otzaria/plugins/models/installed_plugin.dart';
++import 'package:otzaria/plugins/models/plugin_manifest.dart';
++import 'package:otzaria/plugins/repository/plugin_registry_repository.dart';
++import 'package:otzaria/search/search_repository.dart';
++import 'package:otzaria/tabs/bloc/tabs_bloc.dart';
++import 'package:otzaria/tabs/bloc/tabs_state.dart';
++import 'package:otzaria/tools/calendar/bloc/calendar_cubit.dart';
++import 'package:otzaria/utils/navigation/book_open_coordinator.dart';
++import 'package:otzaria/workspaces/bloc/workspace_bloc.dart';
++
++import '../../test_helpers/memory_cache_provider.dart';
++
++class _MockHistoryBloc extends Mock implements HistoryBloc {}
++
++class _MockNavigationBloc extends Mock implements NavigationBloc {}
++
++class _MockCalendarCubit extends Mock implements CalendarCubit {}
++
++class _MockWorkspaceBloc extends Mock implements WorkspaceBloc {}
++
++class _MockSearchRepository extends Mock implements SearchRepository {}
++
++class _MockPersonalNotesRepository extends Mock
++    implements PersonalNotesRepository {}
++
++class _MockBookOpenCoordinator extends Mock implements BookOpenCoordinator {}
++
++class _StubTabsBloc extends Mock implements TabsBloc {
++  TabsState currentState = TabsState.initial();
++
++  @override
++  TabsState get state => currentState;
++}
++
++class _StubPluginRegistryRepository extends PluginRegistryRepository {
++  @override
++  Future<bool?> getPermission(String pluginId, String permission) async => true;
++}
++
++InstalledPlugin _plugin() => InstalledPlugin(
++  pluginId: 'test.plugin',
++  name: 'Test Plugin',
++  version: '1.0.0',
++  installPath: '/',
++  entrypointPath: 'index.html',
++  enabled: true,
++  pinned: true,
++  manifest: PluginManifest(
++    schemaVersion: 1,
++    id: 'test.plugin',
++    name: 'Test Plugin',
++    version: '1.0.0',
++    description: '',
++    author: '',
++    homepage: '',
++    entrypoint: 'index.html',
++    minAppVersion: '1.0.0',
++    sdkVersion: '1.x',
++    permissions: const ['library.books.read', 'tools.read'],
++    networkEnabled: false,
++    networkAllowlist: const [],
++    toolTabTitle: 'Test Plugin',
++    toolTabOrder: 1,
++    defaultPinned: true,
++    publishedDataTypes: const [],
++  ),
++  installedAt: DateTime(2026),
++  updatedAt: DateTime(2026),
++);
++
++Matcher _codedError(String code) => throwsA(
++  isA<Exception>().having((e) => e.toString(), 'message', contains(code)),
++);
++
++void main() {
++  late PluginBridgeAdapter adapter;
++
++  void installLibrary(List<Book> books) {
++    final category = Category(
++      title: 'הלכה',
++      description: '',
++      shortDescription: '',
++      order: 0,
++      subCategories: [],
++      books: books,
++      parent: null,
++    );
++    final library = Library(categories: [category]);
++    category.parent = library;
++    DataRepository.instance.library = Future.value(library);
++  }
++
++  setUpAll(() async {
++    await Settings.init(cacheProvider: MemoryCacheProvider());
++  });
++
++  setUp(() {
++    adapter = PluginBridgeAdapter(
++      _plugin(),
++      dependencies: PluginBridgeDependencies(
++        historyBloc: _MockHistoryBloc(),
++        tabsBloc: _StubTabsBloc(),
++        navigationBloc: _MockNavigationBloc(),
++        calendarCubit: _MockCalendarCubit(),
++        workspaceBloc: _MockWorkspaceBloc(),
++        searchRepository: _MockSearchRepository(),
++        personalNotesRepository: _MockPersonalNotesRepository(),
++        bookOpenCoordinator: _MockBookOpenCoordinator(),
++        themePayloadBuilder: () => <String, dynamic>{},
++        showConfirmDialog: ({required title, required content}) async => true,
++        showWarningDialog:
++            ({required title, required content, required subtitle}) async =>
++                true,
++      ),
++      pluginRepository: _StubPluginRegistryRepository(),
++    );
++  });
++
++  Future<void> expectRejected(Map<String, dynamic> args, String code) =>
++      expectLater(
++        adapter.execute('feedback', 'submitBookCorrection', args),
++        _codedError(code),
++      );
++
++  group('feedback.submitBookCorrection identity', () {
++    for (final args in <Map<String, dynamic>>[
++      {},
++      {'bookId': null},
++      {'bookId': 42},
++      {'bookId': ''},
++      {'bookId': '   '},
++      {'bookId': 'ספר', 'bookUid': 42},
++      {'bookId': 'ספר', 'bookUid': ''},
++      {'bookId': 'ספר', 'bookUid': '   '},
++    ]) {
++      test('דוחה זהות פגומה $args לפני גישה למסד', () async {
++        installLibrary([]);
++        await expectRejected(args, 'error.invalid_params');
++      });
++    }
++
++    test('דוחה UID לא מוכר גם כשהכותרת קיימת', () async {
++      installLibrary([TextBook(id: 42, title: 'ספר')]);
++      await expectRejected(
++        {'bookId': 'ספר', 'bookUid': 'id:999999'},
++        'error.not_found',
++      );
++    });
++
++    test('דוחה כותרת לא מוכרת', () async {
++      installLibrary([TextBook(id: 42, title: 'ספר')]);
++      await expectRejected({'bookId': 'חסר'}, 'error.not_found');
++    });
++
++    test('דוחה כותרת עמומה ללא UID', () async {
++      installLibrary([
++        TextBook(id: 42, title: 'ספר', categoryId: 1),
++        TextBook(id: 43, title: 'ספר', categoryId: 2),
++      ]);
++      await expectRejected({'bookId': 'ספר'}, 'error.not_found');
++    });
++  });
++
++  group('feedback.submitBookCorrection supported sources', () {
++    final unsupported = <String, Book>{
++      'PDF': PdfBook(id: 42, title: 'ספר', path: '/book.pdf'),
++      'אישי': TextBook(id: 42, title: 'ספר', source: BookSource.user),
++      'מצורף': TextBook(
++        id: 42,
++        title: 'ספר',
++        source: BookSource.attached('test-library'),
++      ),
++      'קטלוג חיצוני': TextBook(
++        id: 42,
++        title: 'ספר',
++        externalLibraryId: 'remote:42',
++      ),
++      'קובץ ללא מזהה DB': TextBook(title: 'ספר', filePath: '/external.txt'),
++      'מהדורה חלופית': TextBook(
++        id: 42,
++        title: 'ספר',
++        versionTitle: 'alternate-version',
++      ),
++    };
++    for (final entry in unsupported.entries) {
++      test('דוחה ${entry.key} לפני גישה למסד', () async {
++        installLibrary([entry.value]);
++        await expectRejected({'bookId': 'ספר'}, 'error.unsupported_context');
++      });
++    }
++  });
++}
+diff --git a/test/plugins/bridge/plugin_bridge_handler_test.dart b/test/plugins/bridge/plugin_bridge_handler_test.dart
+index 1ebd02c24..bee3a2922 100644
+--- a/test/plugins/bridge/plugin_bridge_handler_test.dart
++++ b/test/plugins/bridge/plugin_bridge_handler_test.dart
+@@ -393,6 +393,95 @@ void main() {
+       },
+     );
+ 
++    group('feedback.submitBookCorrection', () {
++      const request = [
++        {'method': 'feedback.submitBookCorrection', 'payload': {}},
++      ];
++
++      test(
++        'הצהרה חסרה חוסמת את השליחה גם כשההרשאה מוענקת',
++        () async {
++          final adapter = _FakeAdapter();
++          final handler = buildHandler(
++            declaredPermissions: const [],
++            granted: true,
++            adapter: adapter,
++          );
++
++          final response = await handler.handleRpcForTesting(request) as Map;
++
++          expect(response['success'], isFalse);
++          expect(response['error']['code'], 'permission_denied');
++          expect(adapter.executeCalls, 0);
++        },
++      );
++
++      for (final grant in [false, null]) {
++        test(
++          'הרשאה מוצהרת ללא הענקה ($grant) חוסמת את השליחה',
++          () async {
++            final adapter = _FakeAdapter();
++            final handler = buildHandler(
++              declaredPermissions: const ['feedback.send_email'],
++              granted: grant,
++              adapter: adapter,
++            );
++
++            final response = await handler.handleRpcForTesting(request) as Map;
++
++            expect(response['success'], isFalse);
++            expect(response['error']['code'], 'permission_denied');
++            expect(adapter.executeCalls, 0);
++          },
++        );
++      }
++
++      test(
++        'feedback.send_email בלבד מאפשרת שליחה ושומרת את התוצאה',
++        () async {
++          const result = {'status': 'queued', 'reportId': 'stable-id'};
++          final adapter = _FakeAdapter(result: result);
++          final handler = buildHandler(
++            declaredPermissions: const ['feedback.send_email'],
++            granted: true,
++            adapter: adapter,
++          );
++
++          final response = await handler.handleRpcForTesting(request) as Map;
++
++          expect(response['success'], isTrue);
++          expect(response['data'], result);
++          expect(adapter.executeCalls, 1);
++          expect(adapter.lastDomain, 'feedback');
++          expect(adapter.lastAction, 'submitBookCorrection');
++        },
++      );
++
++      for (final code in ['error.source_changed', 'error.report_id_conflict']) {
++        test(
++          'שומרת את קוד השגיאה $code ואת ההודעה',
++          () async {
++            const message = 'הדיווח נדחה';
++            final adapter = _FakeAdapter(
++              errorToThrow: Exception('$code: $message'),
++            );
++            final handler = buildHandler(
++              declaredPermissions: const ['feedback.send_email'],
++              granted: true,
++              adapter: adapter,
++            );
++
++            final response = await handler.handleRpcForTesting(request) as Map;
++
++            expect(response['success'], isFalse);
++            expect(response['error']['code'], code);
++            expect(response['error']['message'], message);
++            expect(adapter.executeCalls, 1);
++          },
++        );
++      }
++    });
++
+     test('feedback.report ללא הרשאה כלשהי במניפסט → execute נקרא', () async {
+       // גבול האבטחה של report הוא דיאלוג האישור של המשתמש, ולכן היא אינה
+       // דורשת הרשאת manifest — בשונה מ-feedback.sendEmail.
+diff --git a/test/plugins/bridge/plugin_bridge_permission_table_test.dart b/test/plugins/bridge/plugin_bridge_permission_table_test.dart
+index 6a9fd5a9b..42234e89b 100644
+--- a/test/plugins/bridge/plugin_bridge_permission_table_test.dart
++++ b/test/plugins/bridge/plugin_bridge_permission_table_test.dart
+@@ -67,6 +67,23 @@ void main() {
+   group('טבלת ההרשאות של הגשר', () {
+     const table = PluginBridgeHandler.methodPermissions;
+ 
++    test('דיווח תיקון ספר דורש הרשאת שליחה בלי הרשאת רשת או DB', () {
++      expect(table['feedback.submitBookCorrection'], 'feedback.send_email');
++      expect(
++        apiCallToPermissionHint['feedback.submitBookCorrection'],
++        'feedback.send_email',
++      );
++      expect(
++        PluginBridgeHandler.hasOwnTimeout('feedback.submitBookCorrection'),
++        isTrue,
++      );
++      expect(
++        PluginExtendedValidator
++            .methodMinVersions['feedback.submitBookCorrection'],
++        '0.9.99',
++      );
++    });
++
+     test('לכל method מוכר יש רישום מפורש בטבלה', () {
+       final missing =
+           PluginExtendedValidator.knownApiMethods
+diff --git a/test/plugins/services/context_menu_registry_test.dart b/test/plugins/services/context_menu_registry_test.dart
+index 00333d2a4..c87c53f0c 100644
+--- a/test/plugins/services/context_menu_registry_test.dart
++++ b/test/plugins/services/context_menu_registry_test.dart
+@@ -58,6 +58,28 @@ void main() {
+       expect(item.contexts, ['reader-highlight']);
+     });
+ 
++    test('מקבל reader-book ומוריש אותו לפריטי משנה ללא שינוי ברירת המחדל', () {
++      final item = registry.registerPayload('corrections', {
++        'id': 'book-menu',
++        'title': 'פעולות בספר',
++        'type': 'submenu',
++        'contexts': ['reader-book'],
++        'children': [
++          {'id': 'correct-book', 'title': 'העבר את הספר לתיקון'},
++        ],
++      });
++      expect(item.contexts, ['reader-book']);
++      expect(item.children.single.contexts, ['reader-book']);
++      final legacy = registry.registerPayload('legacy', {
++        'id': 'selection',
++        'title': 'פעולה על סימון',
++      });
++      expect(legacy.contexts, [
++        'reader-selection',
++        'reader-page-shape-selection',
++      ]);
++    });
++
+     group('action — פעולת host דקלרטיבית', () {
+       Map<String, dynamic> actionItem({
+         Map<String, dynamic> extra = const {},
+diff --git a/test/plugins/services/plugin_book_correction_service_test.dart b/test/plugins/services/plugin_book_correction_service_test.dart
+new file mode 100644
+index 000000000..1a5bc8322
+--- /dev/null
++++ b/test/plugins/services/plugin_book_correction_service_test.dart
+@@ -0,0 +1,252 @@
++import 'package:flutter_test/flutter_test.dart';
++import 'package:otzaria/models/direct_error_report.dart';
++import 'package:otzaria/plugins/services/plugin_book_correction_service.dart';
++import 'package:otzaria/services/direct_error_report_service.dart';
++import 'package:otzaria/widgets/smart_text/text_renderer_service.dart';
++
++void main() {
++  const metadata = PluginBookReportMetadata(
++    bookId: 42,
++    title: 'ספר',
++    sourceFolder: 'Sefaria',
++    filePath: 'ספרים/ספר.txt',
++    libraryVersion: '2026.10',
++    client: ReportClientInfo(appVersion: '0.9.99', platform: 'windows'),
++  );
++  late DirectErrorReport report;
++  late List<int> loaded;
++  late PluginBookCorrectionService service;
++  setUp(() {
++    loaded = [];
++    service = PluginBookCorrectionService(
++      senderEmail: () => 'reader@example.com',
++      deliver: (value, {required bool allowQueue}) async {
++        report = value;
++        return DirectReportDeliveryResult.sent('נשלח');
++      },
++      now: () => DateTime.utc(2026, 10, 6),
++    );
++  });
++  Future<Map<String, dynamic>> submit(
++    List<String> raw,
++    String original,
++    String proposed, {
++    int? start,
++    int? end,
++    Map<String, dynamic> extra = const {},
++  }) => service.submit(
++    pluginId: 'test.plugin',
++    metadata: metadata,
++    args: {
++      'reportId': 'stable-id',
++      'sectionIndex': 7,
++      'endSectionIndex': 7 + raw.length - 1,
++      'snapshots': [
++        for (var i = 0; i < raw.length; i++)
++          {'index': 7 + i, 'text': TextRendererService.stripHtml(raw[i])},
++      ],
++      'original': original,
++      'proposed': proposed,
++      'sourceStart': ?start,
++      'sourceEnd': ?end,
++      ...extra,
++    },
++    loadSource: (index) async {
++      loaded.add(index);
++      return PluginBookReportSource(raw[index - 7], heRef: 'סימן א');
++    },
++  );
++
++  test('בונה תיקון v2 בטווח מקורי UTF-16 גם אחרי emoji', () async {
++    await submit(['😀 אָב אָב'], 'אָב', 'אֵם', start: 7, end: 10);
++    expect(report.correction?.originalLine, '😀 אָב אָב');
++    expect(report.correction?.selectionStart, 7);
++    expect(report.correction?.originalSelection, 'אָב');
++    expect(report.location?.lineIndex, 7);
++    expect(report.location?.bookId, 42);
++    expect(report.lineNumber, 8);
++    expect(report.id, 'test.plugin:stable-id');
++    final payload = report.toApiPayload();
++    expect(payload['schema_version'], 2);
++    expect(payload['report_kind'], 'text_correction');
++    expect(payload['content_digest'], matches(RegExp(r'^[0-9a-f]{64}$')));
++  });
++
++  test('HTML נשמר במקור ורק טווח טקסט חד משמעי משויך אליו', () async {
++    await submit(['<b>אָב</b> סוף'], 'אָב', 'אֵם', start: 0, end: 3);
++    expect(report.correction?.originalLine, '<b>אָב</b> סוף');
++    expect(report.correction?.selectionStart, 3);
++    expect(report.correction?.contextAfter, '</b> סוף');
++  });
++
++  test('entity או טווח שחוצה HTML נשלחים כ-v2 חופשי ללא טווח כוזב', () async {
++    await submit(['א&amp;ב'], '&', 'וגם', start: 1, end: 2);
++    expect(report.correction, isNull);
++    expect(report.reportKind, DirectErrorReportKind.freeText);
++    expect(report.contextText, 'א&amp;ב');
++    expect(report.errorDetails, contains('מקור: &\nמוצע: וגם'));
++    await submit(['מי<b>לה</b>'], 'מילה', 'חדש', start: 0, end: 4);
++    expect(report.correction, isNull);
++  });
++
++  test('מחיקה בין פסקאות מאמתת את כולן ושומרת fallback מדויק', () async {
++    await submit(['אחד', '<b>שניים</b>', 'שלושה'], 'אחד\nשניים\nשלושה', '');
++    expect(loaded, [7, 8, 9]);
++    expect(report.correction, isNull);
++    expect(report.contextText, 'אחד\n<b>שניים</b>\nשלושה');
++    expect(report.errorDetails, contains('מוצע: (מחיקה)'));
++  });
++
++  test('מקור ששונה אינו מועבר לשירות השליחה', () async {
++    var delivered = false;
++    service = PluginBookCorrectionService(
++      senderEmail: () => 'reader@example.com',
++      deliver: (_, {required bool allowQueue}) async {
++        delivered = true;
++        return DirectReportDeliveryResult.sent('נשלח');
++      },
++    );
++    await expectLater(
++      submit(
++        ['מקור'],
++        'מקור',
++        'חדש',
++        extra: {
++          'snapshots': [
++            {'index': 7, 'text': 'ישן'},
++          ],
++        },
++      ),
++      throwsA(
++        predicate((Object e) => e.toString().contains('error.source_changed')),
++      ),
++    );
++    expect(delivered, isFalse);
++  });
++
++  test('בקשה בלי מייל שמור אינה טוענת מקור או שולחת', () async {
++    service = PluginBookCorrectionService(
++      senderEmail: () => '',
++      deliver: (_, {required bool allowQueue}) async =>
++          throw StateError('לא לשלוח'),
++    );
++    await expectLater(
++      submit(['א'], 'א', 'ב'),
++      throwsA(
++        predicate(
++          (Object e) => e.toString().contains('error.report_email_required'),
++        ),
++      ),
++    );
++    expect(loaded, isEmpty);
++  });
++
++  test('allowQueue false מועבר לשירות ושליחה כושלת אינה מאושרת', () async {
++    service = PluginBookCorrectionService(
++      senderEmail: () => 'reader@example.com',
++      deliver: (_, {required bool allowQueue}) async {
++        expect(allowQueue, isFalse);
++        return DirectReportDeliveryResult.failed('אין רשת');
++      },
++    );
++    await expectLater(
++      submit(['א'], 'א', 'ב', extra: {'allowQueue': false}),
++      throwsA(
++        predicate((Object e) => e.toString().contains('error.report_failed')),
++      ),
++    );
++  });
++
++  test('מצב תור מחזיר בעלות מקומית בלי לטעון שהשרת תמך בתיקון', () async {
++    service = PluginBookCorrectionService(
++      senderEmail: () => 'reader@example.com',
++      deliver: (_, {required bool allowQueue}) async {
++        expect(allowQueue, isTrue);
++        return DirectReportDeliveryResult.queued('נשמר');
++      },
++    );
++    final result = await submit(['א'], 'א', 'ב');
++    expect(result['status'], 'queued');
++    expect(result['correctionSupported'], isNull);
++  });
++
++  test('התנגשות מזהה מובחנת מכשל רשת כדי לאפשר מזהה חדש', () async {
++    service = PluginBookCorrectionService(
++      senderEmail: () => 'reader@example.com',
++      deliver: (_, {required bool allowQueue}) async =>
++          DirectReportDeliveryResult.failed('התנגשות', isIdConflict: true),
++    );
++    await expectLater(
++      submit(['א'], 'א', 'ב', extra: {'allowQueue': false}),
++      throwsA(
++        predicate(
++          (Object e) => e.toString().contains('error.report_id_conflict'),
++        ),
++      ),
++    );
++  });
++
++  test('תמונות מקור חסרות או טווח לא מתאים נדחים', () async {
++    await expectLater(
++      submit(['א', 'ב'], 'א\nב', 'ג', extra: {'snapshots': []}),
++      throwsException,
++    );
++    await expectLater(
++      submit(['א'], 'א', 'ב', start: 1, end: 2),
++      throwsException,
++    );
++    await expectLater(submit(['א'], 'ג', 'ב'), throwsException);
++  });
++
++  test('הוספה ריקה מקבלת תיקון שורה שלמה ולא בחירה ריקה', () async {
++    await submit(['אב'], '', 'ג', start: 1, end: 1);
++    expect(report.correction?.hasSelection, isFalse);
++    expect(report.correction?.proposedText, 'אגב');
++  });
++
++  test('פסקה ארוכה נשמרת כתמונת מקור מלאה ודיווח חופשי מוגבל בגודל', () async {
++    final raw = '${'א' * 19999}😀${'ב' * 5000}';
++    await submit([raw], 'א', 'ג', start: 0, end: 1);
++    expect(report.correction, isNull);
++    expect(report.contextText.length, lessThanOrEqualTo(20000));
++    expect(report.exceedsApiBodyLimit, isFalse);
++    expect(report.contextText, endsWith('…'));
++  });
++
++  test('היסטים שונים בהוספה חופשית נשמרים ומפיקים digest שונה', () async {
++    await submit(
++      ['אב'],
++      '',
++      'ג',
++      start: 0,
++      end: 0,
++      extra: {'forceFreeText': true},
++    );
++    final firstDigest = report.contentDigest;
++    expect(report.errorDetails, contains('UTF-16: [0, 0)'));
++    await submit(
++      ['אב'],
++      '',
++      'ג',
++      start: 1,
++      end: 1,
++      extra: {'forceFreeText': true},
++    );
++    expect(report.errorDetails, contains('UTF-16: [1, 1)'));
++    expect(report.contentDigest, isNot(firstDigest));
++  });
++
++  test('חלק של הוספה גדולה אינו הופך להצעת שורה שלמה חלופית', () async {
++    await submit(
++      ['אב'],
++      '',
++      'ג',
++      start: 1,
++      end: 1,
++      extra: {'forceFreeText': true},
++    );
++    expect(report.correction, isNull);
++    expect(report.reportKind, DirectErrorReportKind.freeText);
++    expect(report.errorDetails, contains('מוצע: ג'));
++  });
++}
+diff --git a/test/services/direct_error_report_service_test.dart b/test/services/direct_error_report_service_test.dart
+index 7bd3922af..0ab00df26 100644
+--- a/test/services/direct_error_report_service_test.dart
++++ b/test/services/direct_error_report_service_test.dart
+@@ -616,6 +616,96 @@ void main() {
+       );
+     });
+ 
++    for (final offline in [true, false]) {
++      test('מזהה בתור עם תוכן שונה נדחה במצב offline=$offline', () async {
++        await Settings.setValue<bool>(
++          SettingsRepository.keyOfflineMode,
++          offline,
++        );
++        addTearDown(
++          () =>
++              Settings.setValue<bool>(SettingsRepository.keyOfflineMode, false),
++        );
++        final service = DirectErrorReportService(
++          reportStore: store,
++          client: MockClient((_) async => http.Response('unavailable', 503)),
++        );
++        addTearDown(service.closeHttpClient);
++        final original = buildCorrectionReport(id: 'stable-id');
++        expect((await service.submitReport(original)).isQueued, isTrue);
++        final changed = original.copyWith(errorDetails: 'תוכן שונה');
++        final result = await service.submitReport(changed);
++        expect(result.status, DirectReportDeliveryStatus.failed);
++        expect(result.isIdConflict, isTrue);
++        final pending = await service.getPendingReports();
++        expect(pending, hasLength(1));
++        expect(pending.single.contentDigest, original.contentDigest);
++        expect((await service.submitReport(original)).isQueued, isTrue);
++        expect(await service.getPendingReports(), hasLength(1));
++      });
++    }
++
++    test('בקשות מקבילות באותו מזהה אינן מאשרות תוכן שלא נשמר', () async {
++      final bothStarted = Completer<void>();
++      var requests = 0;
++      final service = DirectErrorReportService(
++        reportStore: store,
++        client: MockClient((_) async {
++          if (++requests == 2) bothStarted.complete();
++          await bothStarted.future;
++          return http.Response('unavailable', 503);
++        }),
++      );
++      addTearDown(service.closeHttpClient);
++      final original = buildCorrectionReport(id: 'parallel-id');
++      final changed = original.copyWith(errorDetails: 'תוכן אחר');
++      final results = await Future.wait([
++        service.submitReport(original),
++        service.submitReport(changed),
++      ]);
++      expect(results.where((result) => result.isQueued), hasLength(1));
++      expect(results.where((result) => result.isIdConflict), hasLength(1));
++      final pending = await service.getPendingReports();
++      expect(pending, hasLength(1));
++      final accepted = results.first.isQueued ? original : changed;
++      expect(pending.single.contentDigest, accepted.contentDigest);
++    });
++
++    test('allowQueue false אינו שומר כשל זמני בתור', () async {
++      final service = DirectErrorReportService(
++        reportStore: store,
++        client: MockClient((_) async => http.Response('offline', 503)),
++      );
++      final result = await service.submitReport(
++        _buildReport(id: 'no-queue-transient'),
++        allowQueue: false,
++      );
++      expect(result.status, DirectReportDeliveryStatus.failed);
++      expect(await service.getPendingReports(), isEmpty);
++    });
++
++    test('allowQueue false במצב מנותק אינו שולח ואינו שומר בתור', () async {
++      await Settings.setValue<bool>(SettingsRepository.keyOfflineMode, true);
++      addTearDown(
++        () => Settings.setValue<bool>(SettingsRepository.keyOfflineMode, false),
++      );
++      var requests = 0;
++      final service = DirectErrorReportService(
++        reportStore: store,
++        client: MockClient((_) async {
++          requests++;
++          return http.Response('', 200);
++        }),
++      );
++      final result = await service.submitReport(
++        _buildReport(id: 'no-queue-offline'),
++        allowQueue: false,
++      );
++      expect(result.status, DirectReportDeliveryStatus.failed);
++      expect(requests, 0);
++      expect(await service.getPendingReports(), isEmpty);
++    });
++
+     test(
+       'transient failure queue message uses sefaria label for sefaria source',
+       () async {
+diff --git a/test/text_book/utils/reader_plugin_menu_entries_test.dart b/test/text_book/utils/reader_plugin_menu_entries_test.dart
+index c7f670c58..9fb1c7cf5 100644
+--- a/test/text_book/utils/reader_plugin_menu_entries_test.dart
++++ b/test/text_book/utils/reader_plugin_menu_entries_test.dart
+@@ -1,6 +1,7 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_test/flutter_test.dart';
+ import 'package:otzaria/models/books.dart';
++import 'package:otzaria/plugins/services/plugin_highlight_registry.dart';
+ import 'package:otzaria/plugins/models/plugin_context_menu_item.dart';
+ import 'package:otzaria/text_book/bloc/text_book_state.dart';
+ import 'package:otzaria/text_book/utils/reader_plugin_menu_entries.dart';
+@@ -33,6 +34,23 @@ void main() {
+     positionsListener: ItemPositionsListener.create(),
+   );
+ 
++  test('זהות ספר ללא סימון כוללת את הפסקה שנלחצה ולא טווח מומצא', () {
++    final payload = buildReaderBookPayload(state: state(), paragraphIndex: 2);
++    expect(payload['id'], 7);
++    expect(payload['bookId'], 'ספר בדיקה');
++    expect(payload['currentBookId'], 'ספר בדיקה');
++    expect(payload['bookTitle'], 'ספר בדיקה');
++    expect(payload['type'], 'text');
++    expect(payload['source'], 'library');
++    expect(payload['bookUid'], isNotEmpty);
++    expect(payload['sectionIndex'], 2);
++    expect(payload['currentIndex'], 2);
++    expect(payload['text'], isEmpty);
++    expect(payload['start'], isNull);
++    expect(payload['end'], isNull);
++    expect(payload.containsKey('sourceRange'), isFalse);
++  });
++
+   group('buildReaderSelectionPayload', () {
+     for (final (startColumn, pointerColumn) in [
+       (0, 2),
+@@ -203,6 +221,151 @@ void main() {
+       );
+     });
+ 
++    testWidgets('פעולת ספר מוצגת ללא סימון בשני הקוראים', (tester) async {
++      const bookItems = [
++        (
++          'plugin.book',
++          PluginContextMenuItem(
++            id: 'correct-book',
++            label: 'העבר את הספר לתיקון',
++            contexts: ['reader-book'],
++          ),
++        ),
++        (
++          'plugin.selection',
++          PluginContextMenuItem(id: 'selection', label: 'פעולה על סימון'),
++        ),
++      ];
++      for (final context in [
++        'reader-selection',
++        'reader-page-shape-selection',
++      ]) {
++        expect(
++          await labels(
++            tester,
++            hasSelection: false,
++            selectionContext: context,
++            pluginItems: bookItems,
++          ),
++          ['---', 'העבר את הספר לתיקון'],
++        );
++      }
++    });
++
++    testWidgets('סימון פעיל מציג פעולות סימון בלבד גם כשנרשמו פעולות ספר', (
++      tester,
++    ) async {
++      expect(
++        await labels(
++          tester,
++          hasSelection: true,
++          pluginItems: const [
++            (
++              'plugin.book',
++              PluginContextMenuItem(
++                id: 'book',
++                label: 'פעולת ספר',
++                contexts: ['reader-book'],
++              ),
++            ),
++            (
++              'plugin.selection',
++              PluginContextMenuItem(
++                id: 'selection',
++                label: 'פעולת סימון',
++                contexts: ['reader-selection'],
++              ),
++            ),
++            (
++              'plugin.highlight',
++              PluginContextMenuItem(
++                id: 'highlight',
++                label: 'פעולת הדגשה',
++                contexts: ['reader-highlight'],
++              ),
++            ),
++          ],
++        ),
++        ['---', 'פעולת סימון'],
++      );
++    });
++
++    testWidgets('פעולות ספר והדגשה קיימת מוצגות יחד ללא סימון', (tester) async {
++      const owner = 'reader-menu-highlight-test';
++      final selection = buildReaderSelectionPayload(
++        state: state(),
++        lines: lines,
++        paragraphIndex: 0,
++        selectedText: 'שלום עולם',
++        anchor: (lineStart: 0, lineEnd: 0, startColumn: 0, pointerColumn: 0),
++        settings: settings,
++      );
++      PluginHighlightRegistry.instance.setHighlight(
++        ownerPluginId: owner,
++        payload: {
++          'bookId': state().book.title,
++          'sectionIndex': 0,
++          'range': selection['sourceRange'],
++          'style': {'backgroundColor': '#FFE066'},
++        },
++      );
++      addTearDown(
++        () => PluginHighlightRegistry.instance.clearAll(ownerPluginId: owner),
++      );
++      late BuildContext context;
++      await tester.pumpWidget(
++        Directionality(
++          textDirection: TextDirection.rtl,
++          child: Builder(
++            builder: (c) {
++              context = c;
++              return const Center(
++                child: Text('שלום עולם', style: TextStyle(fontSize: 24)),
++              );
++            },
++          ),
++        ),
++      );
++      final entries = buildReaderPluginMenuEntries(
++        root: tester.renderObject(find.text('שלום עולם')),
++        state: state(),
++        lines: lines,
++        paragraphIndex: 0,
++        hasSelection: false,
++        selectedText: null,
++        anchor: (
++          lineStart: null,
++          lineEnd: null,
++          startColumn: null,
++          pointerColumn: null,
++        ),
++        settings: () => settings,
++        tapPosition: tester.getCenter(find.text('שלום עולם')),
++        menuContext: context,
++        pluginItems: const [
++          (
++            'plugin.book',
++            PluginContextMenuItem(
++              id: 'book',
++              label: 'פעולת ספר',
++              contexts: ['reader-book'],
++            ),
++          ),
++          (
++            owner,
++            PluginContextMenuItem(
++              id: 'highlight',
++              label: 'פעולת הדגשה',
++              contexts: ['reader-highlight'],
++            ),
++          ),
++        ],
++      );
++      expect(
++        [for (final entry in entries) entry.isDivider ? '---' : entry.label],
++        ['---', 'פעולת ספר', '---', 'פעולת הדגשה'],
++      );
++    });
+     testWidgets('without a selection only a clicked highlight counts', (
+       tester,
+     ) async {
