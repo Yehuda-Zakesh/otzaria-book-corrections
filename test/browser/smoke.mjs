@@ -23,7 +23,7 @@ window.mockReports = [];
 window.mockEmail = 'mock@example.com';
 window.mockLines = ['טקסט מקורי', 'פסקה שנייה'];
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
-if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify({success:true})}; })();
+if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); if(window.mockNetworkFails) throw new Error('Network unavailable'); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify({success:true})}; })();
 return (async()=>{ let data = null;
 if(method==='app.getTheme') data=mockTheme;
 else if(method==='app.getUserEmail') data={email:window.mockEmail};
@@ -119,6 +119,18 @@ const waitFor = async (expression, label) => {
   for (let i = 0; i < 120; i++) { if (await evaluate(expression)) return; await new Promise(resolve => setTimeout(resolve, 50)); }
   throw new Error(`Timed out: ${label}`);
 };
+// Restore the exact failure reported by the user, then type using browser input.
+await evaluate(`window.mockNetworkFails=true;document.getElementById('proposed').value='טיוטה לפני כשל';document.getElementById('proposed').dispatchEvent(new Event('input'));document.getElementById('editor').requestSubmit()`);
+await waitFor(`document.getElementById('status').textContent.includes('Network unavailable') && !document.getElementById('proposed').readOnly`, 'failed delivery unlocks editing');
+const failedWorkspace = await evaluate('window.mockWorkspace');
+const failedBoot = await call('Page.addScriptToEvaluateOnNewDocument', {source:`window.mockStoredSession=${JSON.stringify(failedWorkspace)};`});
+await call('Page.reload');
+await waitFor(`document.getElementById('proposed').value==='טיוטה לפני כשל' && document.getElementById('send').textContent==='המשך שליחה'`, 'failed draft restores its retry queue');
+assert.equal(await evaluate(`document.getElementById('proposed').readOnly`), false);
+await evaluate(`document.getElementById('proposed').focus();document.getElementById('proposed').select()`);
+await call('Input.insertText', {text:'טיוטת ספר ראשון'});
+await waitFor(`window.mockStoredSession.editedText==='טיוטת ספר ראשון' && window.mockStoredSession.queue===null`, 'new wording discards stale unsent reports and saves after restart');
+await call('Page.removeScriptToEvaluateOnNewDocument', {identifier:failedBoot.identifier});
 // Each tab must retain its draft, search state, selection and scroll position.
 await evaluate(`document.getElementById('proposed').value='טיוטת ספר ראשון'; document.getElementById('proposed').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('proposed').setSelectionRange(3,7); document.getElementById('nav-search-tab').click(); document.getElementById('book-search').value='טיוטת'; document.getElementById('book-search').dispatchEvent(new Event('input')); window.secondLines=Array.from({length:180},(_,i)=>'פסקה '+i+' '+('תוכן הספר השני '.repeat(20))); window.mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'second-book',id:2}});`);
 await waitFor(`document.getElementById('screen-title').textContent==='ספר שני' && !document.getElementById('proposed').readOnly`, 'second tab opens');
@@ -178,17 +190,27 @@ await evaluate(`(()=>{
   window.largeSession={id:'large',book:{...mockStoredSession.book,originalText:text,sections,toc},editedText:text,queue:null,completed:false,location:{sectionIndex:0,offset:0}};
 })()`);
 const largeSession = await evaluate('window.largeSession');
-await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.mockStoredSession = ${JSON.stringify(largeSession)};` });
+const hiddenBoot = await call('Page.addScriptToEvaluateOnNewDocument', { source: `window.mockStoredSession = ${JSON.stringify(largeSession)};document.addEventListener('DOMContentLoaded',()=>{document.body.style.display='none';});` });
 await call('Page.reload');
 for (let attempt = 0; attempt < 80; attempt++) {
-  if (await evaluate(`document.getElementById('proposed')?.value.length > 16000 && document.getElementById('status')?.textContent === ''`)) break;
+  if (await evaluate(`document.getElementById('proposed')?.value.length >= 16000 && document.getElementById('status')?.textContent === ''`)) break;
   await new Promise(resolve => setTimeout(resolve, 100));
 }
 assert.equal(await evaluate(`document.getElementById('page-position') === null && document.getElementById('editor-pages') === null`), true);
+assert.equal(await evaluate(`document.getElementById('proposed').clientWidth`), 0, 'restored plugin starts hidden like an inactive Otzaria tab');
+await evaluate(`document.body.style.display=''`);
+await evaluate(`window.mockHandlers['plugin.resumed']()`);
+await waitFor(`parseFloat(document.getElementById('proposed').style.height)>100`, 'restored editor initializes when its tab becomes visible');
+assert.equal(await evaluate(`document.getElementById('proposed').readOnly`), false);
+await evaluate(`document.getElementById('proposed').focus();document.getElementById('proposed').setSelectionRange(0,0)`);
+await call('Input.insertText', {text:'תיקון לאחר פתיחה מחדש '});
+await waitFor(`window.mockStoredSession.editedText?.startsWith('תיקון לאחר פתיחה מחדש ')`, 'typing in a restored tab is saved');
+assert.equal(await evaluate(`window.mockStoredSession.editedText.slice('תיקון לאחר פתיחה מחדש '.length)`), largeSession.editedText, 'editing after restart preserves the full hidden remainder of the book');
+await call('Page.removeScriptToEvaluateOnNewDocument', {identifier:hiddenBoot.identifier});
 assert.ok(await evaluate(`document.getElementById('proposed').value.length <= 48003`));
 await evaluate(`const e=document.getElementById('proposed'); e.value='תיקון'+e.value; e.dispatchEvent(new Event('input'));`);
 await new Promise(resolve => setTimeout(resolve, 600));
-assert.equal(await evaluate(`mockStoredSession.editedText`), 'תיקון' + largeSession.editedText);
+assert.equal(await evaluate(`mockStoredSession.editedText`), 'תיקוןתיקון לאחר פתיחה מחדש ' + largeSession.editedText);
 await evaluate(`document.querySelector('#toc-list .toc-label').click(); document.getElementById('book-scroll').scrollTop=30000;`);
 await new Promise(resolve => setTimeout(resolve, 200));
 const scrollNavigation = await evaluate(`({position:document.getElementById('book-scroll').scrollTop,section:Number(document.getElementById('section-number').value),selected:document.querySelector('#toc-list .selected')?.dataset.key})`);
@@ -207,8 +229,8 @@ await evaluate(`document.querySelector('[data-key="i:500"] .toc-label').click()`
 const middleBefore = await evaluate(`document.getElementById('book-scroll').scrollTop`);
 await evaluate(`(()=>{const e=document.getElementById('proposed');e.setRangeText('תוספת',e.selectionStart,e.selectionEnd,'end');e.dispatchEvent(new Event('input'));})()`);
 await new Promise(resolve => setTimeout(resolve, 600));
-const insertionOffset = largeSession.book.sections[500].start + 'תיקון'.length;
-const priorText = 'תיקון' + largeSession.editedText;
+const insertionOffset = largeSession.book.sections[500].start + 'תיקוןתיקון לאחר פתיחה מחדש '.length;
+const priorText = 'תיקוןתיקון לאחר פתיחה מחדש ' + largeSession.editedText;
 const middleText = priorText.slice(0, insertionOffset) + 'תוספת' + priorText.slice(insertionOffset);
 assert.equal(await evaluate('mockStoredSession.editedText'), middleText, 'middle edits preserve all hidden text');
 const middleAfter = await evaluate(`document.getElementById('book-scroll').scrollTop`);

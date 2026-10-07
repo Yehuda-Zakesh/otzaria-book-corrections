@@ -36,9 +36,10 @@ function applyTheme(theme) {
   document.documentElement.style.colorScheme = theme.mode;
 }
 function hasEdits() { return session && session.editedText !== (session.reportedText ?? session.book.originalText); }
+function hasPartialDelivery() { return !session?.completed && session?.queue?.some(item => item.sent) && session.queue.some(item => !item.sent); }
 function controls() {
   const locked = loading || sending;
-  el('proposed').readOnly = locked || (!!session?.queue && !session.completed);
+  el('proposed').readOnly = locked || !!hasPartialDelivery();
   el('send').hidden = !session || chooserOpen;
   el('change-book').hidden = !session || chooserOpen;
   el('change-book').disabled = locked;
@@ -91,7 +92,7 @@ function renderBookTabs() {
   if (session) el('editor').setAttribute('aria-labelledby', `book-tab-${session.id}`);
 }
 function captureView() {
-  if (!session || chooserOpen) return;
+  if (!session || chooserOpen || el('proposed').clientWidth === 0) return;
   session.view = { scrollTop: el('book-scroll').scrollTop ?? 0,
     visibleOffset: continuousEditor?.visibleOffset() ?? visibleRange.start,
     geometry: continuousEditor?.geometry,
@@ -217,6 +218,13 @@ function showEditorRange(offset) {
     el('proposed').value = session.editedText.slice(visibleRange.start, visibleRange.end);
   }
 }
+function initializeVisibleEditor() {
+  // Otzaria may restore the plugin before its tab has a visible viewport.
+  if (!session || chooserOpen || continuousEditor || !(el('proposed').clientWidth > 0)) return;
+  showEditorRange(session.view?.visibleOffset ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
+  restoreView(); controls();
+}
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(initializeVisibleEditor).observe(el('book-scroll'));
 function syncScrollNavigation(offset) {
   if (!session || chooserOpen) return;
   visibleRange = continuousEditor.range;
@@ -350,18 +358,19 @@ function requestBook(event) {
   }).catch(error => message(error.message, true));
 }
 el('proposed').addEventListener('input', () => {
-  if (!session || loading || sending || (session.queue && !session.completed)) return;
-  if (session.completed) {
-    session.reportedText = session.editedText;
-    session.queue = null;
-    session.completed = false;
-  }
+  if (!session || loading || sending || hasPartialDelivery()) return;
+  let editedText;
   if (continuousEditor) {
-    session.editedText = continuousEditor.edited(el('proposed').value); visibleRange = continuousEditor.range;
+    editedText = continuousEditor.edited(el('proposed').value); visibleRange = continuousEditor.range;
   } else {
-    session.editedText = replaceEditorRange(session.editedText, visibleRange, el('proposed').value);
+    editedText = replaceEditorRange(session.editedText, visibleRange, el('proposed').value);
     visibleRange.end = visibleRange.start + el('proposed').value.length;
   }
+  if (editedText === session.editedText) return;
+  if (session.completed) session.reportedText = session.editedText;
+  // Unsent reports belong to the previous wording; rebuild them on next submit.
+  // Until the user changes the text, retain their IDs for an idempotent retry.
+  session.queue = null; session.completed = false; session.editedText = editedText;
   controls(); scheduleSave();
   if (!el('search-view').hidden) { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); }
 });
@@ -464,6 +473,7 @@ async function initialize(boot) {
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
   const stored = results[1].value;
   sessions = stored?.schemaVersion === 2 ? stored.sessions : stored ? [stored] : [];
+  for (const item of sessions) if (item.queue?.length && item.queue.every(report => report.sent)) item.completed = true;
   session = sessions.find(item => item.id === stored?.activeId) ?? sessions[0] ?? null;
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
   render(); restoreView();
@@ -472,6 +482,7 @@ async function initialize(boot) {
 if (host) {
   host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook); host.on('reader.toolbar_item_clicked', requestBook);
   host.on('plugin.suspended', () => { if (session) { captureView(); persist().catch(error => message(error.message, true)); } });
+  host.on('plugin.resumed', () => { initialized?.then(initializeVisibleEditor).catch(error => message(error.message, true)); });
   host.on('plugin.boot', boot => { initialized ??= initialize(boot); initialized.catch(error => message(error.message, true)); });
   if (host._booted) { initialized ??= initialize(); initialized.catch(error => message(error.message, true)); }
 } else { el('empty').hidden = false; message('יש לפתוח את התוסף מתוך אוצריא.'); }
