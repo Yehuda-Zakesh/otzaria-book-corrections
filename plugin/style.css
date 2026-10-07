@@ -89,6 +89,7 @@ button.ghost, button.icon-button { background: transparent; color: var(--onSurfa
 button.ghost:hover, button.icon-button:hover { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
 button.icon-button { width: 32px; height: 32px; min-height: 32px; padding: 6px; }
 .icon-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+#change-book svg { width: 18px; height: 18px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (max-width: 720px) { .book-navigation { width: 250px; flex-basis: 250px; } #editor-canvas { --book-padding: 20px; --book-inline-padding: 20px; } main.reading #status { max-width: calc(100% - 280px); } }
 @media (max-width: 480px) { .topbar { height: 44px; padding: 4px 8px; gap: 8px; } .topbar strong { font-size: 14px; } #location { display: none; } main { padding: 16px; } .book-navigation { width: 180px; flex-basis: 180px; } .nav-header { padding-inline: 8px; } #toc-list { padding-inline: 8px; } #editor-canvas { --book-padding: 16px; --book-inline-padding: 16px; } main.reading #status { max-width: calc(100% - 200px); } }
