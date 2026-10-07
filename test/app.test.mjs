@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 test('full book: partial delivery, persistent queue, reload retry, click guard and failed discard', async () => {
   class Element {
     value = ''; textContent = ''; hidden = false; disabled = false; readOnly = false;
-    handlers = new Map(); classList = { toggle() {} }; style = { setProperty() {} };
-    replaceChildren() {}
-    append() {}
+    handlers = new Map(); children = []; classList = { toggle() {} }; style = { setProperty() {} };
+    replaceChildren(...children) { this.children = children; }
+    append(...children) { this.children.push(...children); }
     setAttribute() {}
     addEventListener(event, handler) { this.handlers.set(event, handler); }
     focus() {}
@@ -44,6 +44,8 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
           storage.delete(args.key);
         }
         else if (method === 'app.getUserEmail') { emailReads++; data = { email: savedEmail }; }
+        else if (method === 'settings.get') data = 'grid';
+      else if (method === 'library.getTree') data = { title: 'ספריית אוצריא', path: '/', categories: [], books: [] };
         else if (method === 'app.getTheme') data = { colorScheme: { primary: '#123456' } };
         else if (method === 'library.getBookDetails') data = { title: 'ספר', source: 'library', type: 'text', lineCount: 2, textSource: { key: 'otzaria-books' }, libraryPath: 'ספרים/ספר.txt' };
         else if (method === 'library.getBookContent') data = raw.slice(args.offset, args.offset + args.limit);

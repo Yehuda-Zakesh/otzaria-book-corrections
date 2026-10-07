@@ -1,23 +1,31 @@
 import { loadBook, MAX_BOOK_BYTES } from './book.js';
+import { sortLibraryTree } from './library-order.js';
 import { diffBook } from './changes.js';
+import { readNikudDisplay, projectNikud, applyDisplayEdit } from './text-display.js';
 import { sendReport } from './report.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
 import { findInBook } from './book-search.js';
-import { editorRange, replaceEditorRange, createContinuousEditor } from './editor-window.js';
+import { editorRange, createContinuousEditor } from './editor-window.js';
 import { buildTocTree, flattenTocTree, activeTocKey, ensurePathExpanded, setAllExpanded } from './toc-tree.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, initialized, loading = false, sending = false, pause = false;
 let sessions = [];
 let chooserOpen = false;
+let libraryTabs = [], activeLibraryId = null;
+const openTabs = () => [...sessions, ...libraryTabs];
+const activeTabId = () => chooserOpen ? activeLibraryId : session?.id;
+let libraryTree = null, libraryExpanded = new Set();
+let libraryPath = '/', libraryMode = 'grid', libraryQueryTimer;
 let writes = Promise.resolve(), saveTimer, revision = 0;
 let unsaved = false;
 let tocBook = null, tocTree = [], tocExpanded = new Set();
 let searchTimer;
 let visibleRange = { start: 0, end: 0 };
 let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
+let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
@@ -50,13 +58,14 @@ function controls() {
   el('proposed').setAttribute('aria-describedby', 'status');
   el('proposed').readOnly = locked || !!hasPartialDelivery();
   el('send').hidden = !session || chooserOpen;
-  el('change-book').hidden = !session || chooserOpen;
+  el('change-book').hidden = false;
   el('change-book').disabled = locked;
   for (const button of el('book-tabs').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('cancel-book-picker').disabled = locked;
   el('send').disabled = locked || !session || session.completed || (!hasEdits() && !session.queue);
   el('send').textContent = sending ? 'שולח דיווחים…' : session?.queue ? 'המשך שליחה' : 'שלח דיווח';
-  for (const id of ['discard', 'load-current', 'open-books']) el(id).disabled = locked;
+  for (const id of ['discard', 'library-search']) el(id).disabled = locked;
+  for (const button of el('library-list').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('pause').hidden = !sending;
   el('discard').textContent = session?.completed ? 'סיים' : 'ביטול התיקונים';
   renderStatus();
@@ -64,33 +73,33 @@ function controls() {
 function render() {
   renderBookTabs();
   el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
-  el('cancel-book-picker').hidden = !session || !chooserOpen;
+  el('cancel-book-picker').hidden = true;
   document.querySelector('main').classList.toggle('reading', !!session && !chooserOpen);
-  el('book-picker').hidden = true;
-  el('load-current').textContent = 'טען את הספר הפתוח';
-  el('location').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? '';
-  el('screen-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תיקוני ספרים';
+  if (!session || chooserOpen) renderLibrary();
+  el('screen-title').textContent = !session || chooserOpen ? 'ספריית אוצריא' : session.book.details.title ?? session.book.identity.bookId;
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
-  if (session) showEditorRange(session.view?.visibleOffset ?? session.view?.selectionStart ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
+  if (session && !chooserOpen) showEditorRange(session.view?.visibleOffset ?? session.view?.selectionStart ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
   renderNavigation();
   controls();
 }
 function renderBookTabs() {
-  const strip = el('book-tabs'); strip.hidden = !sessions.length;
-  const tabs = sessions.map(bookSession => {
-    const row = document.createElement('div'); row.className = `book-tab${bookSession.id === session?.id ? ' active' : ''}`;
+  const items = openTabs(), activeId = activeTabId();
+  const strip = el('book-tabs'); strip.hidden = !items.length;
+  const tabs = items.map(bookSession => {
+    const isLibrary = libraryTabs.includes(bookSession), active = bookSession.id === activeId;
+    const row = document.createElement('div'); row.className = `book-tab${active ? ' active' : ''}`;
     const tab = document.createElement('button'); tab.type = 'button'; tab.className = 'book-tab-title';
-    tab.id = `book-tab-${bookSession.id}`; tab.textContent = bookSession.book.details.title ?? bookSession.book.identity.bookId;
-    tab.title = tab.textContent; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(bookSession.id === session?.id));
-    tab.setAttribute('aria-controls', 'editor'); tab.tabIndex = bookSession.id === session?.id ? 0 : -1;
+    tab.id = `book-tab-${bookSession.id}`; tab.textContent = isLibrary ? 'ספריית אוצריא' : bookSession.book.details.title ?? bookSession.book.identity.bookId;
+    tab.title = tab.textContent; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-selected', String(active));
+    tab.setAttribute('aria-controls', isLibrary ? 'empty' : 'editor'); tab.tabIndex = active ? 0 : -1;
     tab.addEventListener('click', () => activateBook(bookSession.id).catch(error => message(error.message, true)));
     tab.addEventListener('keydown', event => {
       if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
       event.preventDefault();
-      const index = sessions.indexOf(bookSession);
-      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? sessions.length - 1
-        : (index + (event.key === 'ArrowLeft' ? 1 : -1) + sessions.length) % sessions.length;
-      activateBook(sessions[nextIndex].id, true).catch(error => message(error.message, true));
+      const items = openTabs(), index = items.indexOf(bookSession);
+      const nextIndex = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+        : (index + (event.key === 'ArrowLeft' ? 1 : -1) + items.length) % items.length;
+      activateBook(items[nextIndex].id, true).catch(error => message(error.message, true));
     });
     const close = document.createElement('button'); close.type = 'button'; close.className = 'book-tab-close'; close.textContent = '×';
     close.setAttribute('aria-label', `סגור ${tab.textContent}`); close.title = `סגור ${tab.textContent}`;
@@ -98,21 +107,35 @@ function renderBookTabs() {
     row.append(tab, close); return row;
   });
   strip.replaceChildren(...tabs);
-  if (session) el(`book-tab-${session.id}`).scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  if (activeId) el(`book-tab-${activeId}`).scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  if (activeLibraryId) el('empty').setAttribute('aria-labelledby', `book-tab-${activeLibraryId}`);
   if (session) el('editor').setAttribute('aria-labelledby', `book-tab-${session.id}`);
 }
 function captureView() {
+  if (chooserOpen) {
+    const tab = libraryTabs.find(item => item.id === activeLibraryId);
+    if (tab) tab.view = { path: libraryPath, expanded: [...libraryExpanded],
+      query: el('library-search').value, scrollTop: el('library-list').scrollTop ?? 0 };
+    return;
+  }
   if (!session || chooserOpen || el('proposed').clientWidth === 0) return;
   session.view = { scrollTop: el('book-scroll').scrollTop ?? 0,
-    visibleOffset: continuousEditor?.visibleOffset() ?? visibleRange.start,
+    visibleOffset: displayProjection.toSource(continuousEditor?.visibleOffset() ?? visibleRange.start),
     geometry: continuousEditor?.geometry,
-    selectionStart: visibleRange.start + (el('proposed').selectionStart ?? 0),
-    selectionEnd: visibleRange.start + (el('proposed').selectionEnd ?? 0),
+    selectionStart: displayProjection.toSource(visibleRange.start + (el('proposed').selectionStart ?? 0)),
+    selectionEnd: displayProjection.toSource(visibleRange.start + (el('proposed').selectionEnd ?? 0)),
     tocExpanded: [...tocExpanded], tocSearch: el('toc-search').value,
     bookSearch: el('book-search').value, searching: !el('search-view').hidden,
     tocScrollTop: el('toc-list').scrollTop ?? 0 };
 }
 function restoreView() {
+  if (chooserOpen) {
+    const view = libraryTabs.find(item => item.id === activeLibraryId)?.view;
+    libraryPath = view?.path ?? '/';
+    libraryExpanded = new Set(view?.expanded ?? []); el('library-search').value = view?.query ?? '';
+    renderLibrary(); el('library-list').scrollTop = view?.scrollTop ?? 0;
+    return;
+  }
   if (!session) return;
   const view = session.view;
   el('toc-search').value = view?.tocSearch ?? ''; el('book-search').value = view?.bookSearch ?? '';
@@ -123,25 +146,44 @@ function restoreView() {
   el('nav-search-tab').setAttribute('aria-selected', String(!!view?.searching));
   if (view?.searching) renderSearchResults();
   if (view) {
-    el('book-scroll').scrollTop = view.scrollTop;
+    if (Number.isFinite(view.scrollTop)) el('book-scroll').scrollTop = view.scrollTop;
+    else scrollEditorToOffset(view.visibleOffset ?? view.selectionStart ?? 0);
     el('toc-list').scrollTop = view.tocScrollTop;
-    el('proposed').setSelectionRange?.(Math.max(0, view.selectionStart - visibleRange.start), Math.max(0, view.selectionEnd - visibleRange.start));
+    el('proposed').setSelectionRange?.(Math.max(0, displayProjection.toDisplay(view.selectionStart) - visibleRange.start), Math.max(0, displayProjection.toDisplay(view.selectionEnd) - visibleRange.start));
   } else navigateTo(session.location ?? { sectionIndex: 0, offset: 0 });
 }
 async function activateBook(id, focusTab = false) {
   if (loading || sending) return;
+  if (libraryTabs.some(item => item.id === id)) {
+    captureView(); activeLibraryId = id; chooserOpen = true;
+    render(); restoreView(); message(); scheduleSave();
+    if (focusTab) el(`book-tab-${id}`).focus({ preventScroll: true });
+    else el('library-search').focus({ preventScroll: true });
+    return;
+  }
   const next = sessions.find(item => item.id === id); if (!next) return;
-  loading = true; controls();
-  try {
-    captureView(); await persist(); await persist(next);
+  if (next !== session || chooserOpen) {
+    captureView();
     session = next; chooserOpen = false; render(); restoreView(); message();
-    loading = false; controls();
-    if (focusTab) el(`book-tab-${id}`).focus();
-    else el('proposed').focus({ preventScroll: true });
-  } finally { loading = false; controls(); }
+    scheduleSave();
+  }
+  if (focusTab) el(`book-tab-${id}`).focus();
+  else el('proposed').focus({ preventScroll: true });
 }
 async function closeBook(id) {
   if (loading || sending) return;
+  if (libraryTabs.some(item => item.id === id)) {
+    captureView();
+    const items = openTabs(), index = items.findIndex(item => item.id === id), active = activeTabId() === id;
+    libraryTabs = libraryTabs.filter(item => item.id !== id);
+    if (active) {
+      const remaining = openTabs(), next = remaining[Math.min(index, remaining.length - 1)];
+      activeLibraryId = null; chooserOpen = true;
+      if (next) await activateBook(next.id, true);
+      else { render(); el('library-search').focus(); }
+    } else renderBookTabs();
+    scheduleSave(); return;
+  }
   const target = sessions.find(item => item.id === id); if (!target) return;
   loading = true; controls();
   try {
@@ -149,10 +191,18 @@ async function closeBook(id) {
       const result = await call('ui.showConfirm', { title: 'סגירת ספר', content: 'בספר יש תיקונים שטרם נשלחו. סגירת הלשונית תמחק את הטיוטה שלו. לסגור?' });
       if (!result?.confirmed) return;
     }
-    captureView(); await persist();
+    captureView();
     const index = sessions.indexOf(target), remaining = sessions.filter(item => item.id !== id);
     const next = session?.id === id ? remaining[Math.min(index, remaining.length - 1)] ?? null : session;
-    await persist(next, remaining); session = next; chooserOpen = false; render(); restoreView(); message();
+    sessions = remaining;
+    const changed = !chooserOpen && session !== next;
+    session = next;
+    if (changed) { render(); restoreView(); }
+    else renderBookTabs();
+    message(); scheduleSave();
+    loading = false; controls();
+    if (activeTabId()) el(`book-tab-${activeTabId()}`).focus({ preventScroll: true });
+    else el('library-search').focus({ preventScroll: true });
   } finally { loading = false; controls(); }
 }
 function renderNavigation() {
@@ -202,10 +252,11 @@ function navigateTo(location) {
   scrollEditorToOffset(offset);
 }
 function scrollEditorToOffset(offset, end = offset) {
+  offset = displayProjection.toDisplay(offset); end = displayProjection.toDisplay(end);
   const editor = el('proposed');
   if (typeof editor.setSelectionRange !== 'function') return;
   if (continuousEditor) { continuousEditor.scrollTo(offset, end); visibleRange = continuousEditor.range; return; }
-  if (offset < visibleRange.start || end > visibleRange.end) showEditorRange(offset);
+  if (offset < visibleRange.start || end > visibleRange.end) showEditorRange(displayProjection.toSource(offset));
   offset -= visibleRange.start; end = Math.min(end - visibleRange.start, editor.value.length);
   editor.focus(); editor.setSelectionRange(offset, end);
   // Measure wrapped text with the editor's own font and width rather than
@@ -218,14 +269,16 @@ function scrollEditorToOffset(offset, end = offset) {
   editor.scrollTop = Math.max(0, marker.offsetTop - editor.clientHeight / 4); mirror.remove();
 }
 function showEditorRange(offset) {
+  displayProjection = projectNikud(session.editedText, session.hideNikud);
+  offset = displayProjection.toDisplay(offset);
   if (!continuousEditor && el('proposed').clientWidth > 0) {
     continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
   }
   if (continuousEditor) {
-    continuousEditor.setText(session.editedText, offset, session.view?.geometry); visibleRange = continuousEditor.range;
+    continuousEditor.setText(displayProjection.text, offset, session.view?.geometry); visibleRange = continuousEditor.range;
   } else {
-    visibleRange = editorRange(session.editedText, offset);
-    el('proposed').value = session.editedText.slice(visibleRange.start, visibleRange.end);
+    visibleRange = editorRange(displayProjection.text, offset);
+    el('proposed').value = displayProjection.text.slice(visibleRange.start, visibleRange.end);
   }
 }
 function initializeVisibleEditor() {
@@ -237,6 +290,7 @@ function initializeVisibleEditor() {
 if (typeof ResizeObserver !== 'undefined') new ResizeObserver(initializeVisibleEditor).observe(el('book-scroll'));
 function syncScrollNavigation(offset) {
   if (!session || chooserOpen) return;
+  offset = displayProjection.toSource(offset);
   visibleRange = continuousEditor.range;
   if (mappedText !== session.editedText || mappedBook !== session.book) {
     mappedBook = session.book;
@@ -277,7 +331,7 @@ function renderSearchResults() {
     if (!results.length) { const hint = document.createElement('p'); hint.textContent = 'לא נמצאו תוצאות'; group.append(hint); }
     for (const result of results) {
       const row = document.createElement('div'); row.className = 'toc-row search-result';
-      const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = result.snippet;
+      const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = projectNikud(result.snippet, session.hideNikud).text;
       label.addEventListener('click', () => {
         const originalOffset = originalToEditedOffset(session.editedText, session.book.originalText, result.offset);
         let section = session.book.sections[0];
@@ -314,12 +368,15 @@ async function persist(value = session, books = sessions) {
   const nextBooks = value ? [...books.filter(item => item.id !== value.id), value] : books.filter(item => item.id !== session?.id);
   // Preserve tab order when replacing the active draft.
   if (value && books.some(item => item.id === value.id)) nextBooks.splice(0, nextBooks.length, ...books.map(item => item.id === value.id ? value : item));
-  const snapshot = nextBooks.length ? { schemaVersion: 2, activeId: value?.id ?? nextBooks[0].id,
+  const snapshot = nextBooks.length || libraryTabs.length ? { schemaVersion: 2, activeId: value?.id ?? nextBooks[0]?.id,
+    activeLibraryId: chooserOpen ? activeLibraryId : null,
+    libraryTabs: libraryTabs.map(item => ({ ...item, view: item.view ? { ...item.view, expanded: [...item.view.expanded] } : undefined })),
     sessions: nextBooks.map(item => ({ ...item, view: item.view ? { ...item.view, tocExpanded: [...item.view.tocExpanded] } : undefined,
       queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
   await writes;
-  sessions = nextBooks;
+  // A background write must not restore tabs closed or switched since its snapshot.
+  if (books === sessions && savedRevision === revision) sessions = nextBooks;
   if (savedRevision === revision) {
     el('draft-status').textContent = snapshot ? 'הטיוטה נשמרה' : '';
     await call('ui.setUnsavedChanges', { hasChanges: false }).catch(() => {});
@@ -337,7 +394,7 @@ function scheduleSave() {
 function identityFrom(event) {
   const data = event.selection ?? event, bookId = data.bookId ?? data.currentBookId ?? data.currentBook, id = data.id ?? data.currentId;
   if (typeof bookId !== 'string' || !bookId) throw new Error('לא נמצא ספר פתוח. פתחו ספר טקסט ובחרו „העבר את הספר לתיקון”.');
-  return { bookId, ...(id != null ? { bookUid: `id:${id}` } : {}), location: readerPosition(event) };
+  return { bookId, ...(data.bookUid ? { bookUid: data.bookUid } : id != null ? { bookUid: `id:${id}` } : {}), location: readerPosition(event) };
 }
 async function openBook(identity) {
   if (loading || sending) throw new Error('המתינו לסיום הפעולה הנוכחית.');
@@ -348,15 +405,21 @@ async function openBook(identity) {
     const { location, ...bookIdentity } = identity;
     const existing = sessions.find(item => item.book.identity.bookId === bookIdentity.bookId && item.book.identity.bookUid === bookIdentity.bookUid);
     if (existing) {
-      await persist(existing); session = existing; chooserOpen = false; render(); restoreView(); message(); return;
+      await updateNikudDisplay(existing);
+      await persist(existing); finishLibraryTab(); session = existing; chooserOpen = false; render(); restoreView(); message(); scheduleSave(); return;
     }
     const book = await loadBook(call, bookIdentity, progress => message(progress.phase === 'content'
       ? `טוען את הספר… ${Math.round(progress.loaded / 1000)} אלפי תווים` : `ממפה פסקאות… ${progress.loaded} מתוך ${progress.total}`));
     book.toc = await call('library.getBookToc', book.identity).catch(() => []);
-    const next = { id: newId(), book, editedText: book.originalText, queue: null, completed: false, location: location ?? { sectionIndex: 0, offset: 0 } };
-    await persist(next); session = next; chooserOpen = false; render(); restoreView(); message();
+    const hideNikud = await readNikudDisplay(call, book);
+    const next = { id: newId(), book, hideNikud, editedText: book.originalText, queue: null, completed: false, location: location ?? { sectionIndex: 0, offset: 0 } };
+    await persist(next); finishLibraryTab(); session = next; chooserOpen = false; render(); restoreView(); message(); scheduleSave();
     loading = false; controls();
   } finally { loading = false; controls(); }
+}
+function finishLibraryTab() {
+  if (chooserOpen && activeLibraryId) libraryTabs = libraryTabs.filter(item => item.id !== activeLibraryId);
+  activeLibraryId = null;
 }
 let openings = Promise.resolve();
 function requestBook(event) {
@@ -369,13 +432,16 @@ function requestBook(event) {
 }
 el('proposed').addEventListener('input', () => {
   if (!session || loading || sending || hasPartialDelivery()) return;
-  let editedText;
+  const value = el('proposed').value;
+  const editedText = applyDisplayEdit(displayProjection, visibleRange.start, visibleRange.end, value);
+  const visibleValue = projectNikud(value, session.hideNikud).text;
   if (continuousEditor) {
-    editedText = continuousEditor.edited(el('proposed').value); visibleRange = continuousEditor.range;
+    continuousEditor.edited(visibleValue); visibleRange = continuousEditor.range;
   } else {
-    editedText = replaceEditorRange(session.editedText, visibleRange, el('proposed').value);
-    visibleRange.end = visibleRange.start + el('proposed').value.length;
+    el('proposed').value = visibleValue;
+    visibleRange.end = visibleRange.start + visibleValue.length;
   }
+  displayProjection = projectNikud(editedText, session.hideNikud);
   if (editedText === session.editedText) return;
   if (session.completed) session.reportedText = session.editedText;
   // Unsent reports belong to the previous wording; rebuild them on next submit.
@@ -384,50 +450,174 @@ el('proposed').addEventListener('input', () => {
   controls(); scheduleSave();
   if (!el('search-view').hidden) { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); }
 });
-async function chooseOpenBook({ forceChoice = false } = {}) {
+function normalizeLibraryQuery(value) {
+  return value.normalize('NFD').replace(/[\u0591-\u05c7]/g, '').toLocaleLowerCase('he').trim();
+}
+function libraryIcon(folder, type = 'text') {
+  const icon = document.createElement('span'); icon.className = 'library-icon';
+  icon.innerHTML = folder
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h11a2 2 0 0 1 2 2v16H6a3 3 0 0 1-3-3V6a3 3 0 0 1 2-3ZM3 18h15M7 3v12"/>' + (type === 'pdf' ? '<path d="M10 7h5M10 10h5"/>' : '') + '</svg>';
+  return icon;
+}
+function libraryChain(node, path, chain = []) {
+  if (!node) return null;
+  const next = [...chain, node];
+  if (node.path === path || (node === libraryTree && path === '/')) return next;
+  for (const child of node.categories ?? []) {
+    const found = libraryChain(child, path, next); if (found) return found;
+  }
+  return null;
+}
+function navigateLibrary(path) {
+  if (loading || sending) return;
+  libraryPath = path; el('library-search').value = ''; renderLibrary();
+  el('library-list').scrollTop = 0; el('library-search').focus();
+}
+async function selectLibraryBook(book) {
+  if (loading || sending) return;
+  try {
+    if (book.type === 'text') await openBook(identityFrom(book));
+    else {
+      loading = true; controls();
+      await call('reader.openBook', { bookId: book.bookId, ...(book.bookUid ? { bookUid: book.bookUid } : book.id != null ? { id: book.id } : {}), type: book.type });
+      message();
+    }
+  } catch (error) { message(error.message, true); }
+  finally { loading = false; controls(); }
+}
+function updateLibraryGeometry() {
+  const width = el('library-list').clientWidth;
+  const columns = Math.max(1, Math.min(5, Math.floor(width / 250)));
+  el('library-list').style.setProperty('--columns', columns);
+  el('library-list').style.setProperty('--card-ratio', width < 800 ? 3.3 : width >= 1400 ? 2.1 : width >= 1100 ? 1.95 : 1.8);
+}
+function renderLibrary() {
+  const query = normalizeLibraryQuery(el('library-search').value);
+  const chain = libraryChain(libraryTree, libraryPath) ?? (libraryTree ? [libraryTree] : []);
+  const current = chain.at(-1);
+  const breadcrumbs = chain.map((category, index) => {
+    const button = document.createElement('button'); button.type = 'button';
+    button.textContent = index === 0 ? 'ספריית אוצריא' : category.title;
+    if (index === chain.length - 1) button.setAttribute('aria-current', 'page');
+    button.addEventListener('click', () => navigateLibrary(category.path ?? '/')); return button;
+  });
+  el('library-breadcrumbs').replaceChildren(...breadcrumbs);
+  el('library-search').placeholder = 'איתור ספר או מחבר ב' + (current?.title ?? 'ספריית אוצריא');
+  const groups = [];
+  const bookMatches = book => normalizeLibraryQuery((book.title ?? book.bookId) + ' ' + (book.author ?? '')).includes(query);
+  function card(entry, folder, action) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'library-card';
+    button.title = entry.title ?? entry.bookId;
+    const text = document.createElement('span'); text.className = 'library-text';
+    const title = document.createElement('span'); title.className = 'library-name'; title.textContent = button.title; text.append(title);
+    if (entry.author) { const author = document.createElement('span'); author.className = 'library-author'; author.textContent = entry.author; text.append(author); }
+    button.append(text, libraryIcon(folder, entry.type)); button.addEventListener('click', action); return button;
+  }
+  function listRow(entry, level, action, expanded) {
+    const item = document.createElement('div'); item.className = 'toc-row' + (expanded ? ' expanded' : '');
+    item.style.setProperty('--level', level); item.append(libraryIcon(expanded !== undefined, entry.type));
+    const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label';
+    label.textContent = entry.title ?? entry.bookId; label.title = label.textContent; label.addEventListener('click', action); item.append(label);
+    if (expanded !== undefined) {
+      label.setAttribute('aria-expanded', String(expanded));
+      const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'toc-chevron';
+      toggle.setAttribute('aria-label', (expanded ? 'כווץ ' : 'הרחב ') + entry.title); toggle.setAttribute('aria-expanded', String(expanded));
+      toggle.addEventListener('click', action); item.append(toggle);
+    }
+    return item;
+  }
+  function visitTree(node, level, group) {
+    for (const category of node.categories ?? []) {
+      const expanded = libraryExpanded.has(category.path);
+      const container = level === 0 ? document.createElement('div') : group;
+      if (level === 0) { container.className = 'toc-group library-group'; groups.push(container); }
+      container.append(listRow(category, level, () => {
+        if (loading || sending) return;
+        expanded ? libraryExpanded.delete(category.path) : libraryExpanded.add(category.path);
+        renderLibrary();
+        for (const button of el('library-list').querySelectorAll?.('.toc-label') ?? []) {
+          if (button.title === category.title) { button.focus({ preventScroll: true }); break; }
+        }
+      }, expanded));
+      if (expanded) visitTree(category, level + 1, container);
+    }
+    for (const book of node.books ?? []) {
+      const container = level === 0 ? document.createElement('div') : group;
+      if (level === 0) { container.className = 'toc-group library-group'; groups.push(container); }
+      container.append(listRow(book, level, () => selectLibraryBook(book)));
+    }
+  }
+  if (current && !query && libraryMode === 'tree') visitTree(current, 0);
+  else if (current) {
+    const container = document.createElement('div'); container.className = libraryMode === 'grid' ? 'library-grid' : 'toc-group library-group';
+    function add(entry, folder) {
+      const action = folder ? () => navigateLibrary(entry.path) : () => selectLibraryBook(entry);
+      container.append(libraryMode === 'grid' ? card(entry, folder, action) : listRow(entry, 0, action));
+    }
+    function collect(node) {
+      for (const category of node.categories ?? []) {
+        if (!query || normalizeLibraryQuery(category.title).includes(query)) add(category, true);
+        if (query) collect(category);
+      }
+      for (const book of node.books ?? []) if (!query || bookMatches(book)) add(book, false);
+    }
+    collect(current);
+    if (container.children.length) groups.push(container);
+  }
+  if (!groups.length && libraryTree) { const hint = document.createElement('p'); hint.className = 'library-no-results'; hint.textContent = query ? 'לא נמצאו תוצאות' : 'אין ספרים בתיקייה זו'; groups.push(hint); }
+  const scroll = el('library-list').scrollTop;
+  el('library-list').replaceChildren(...groups); el('library-list').scrollTop = scroll;
+  updateLibraryGeometry(); controls();
+}
+el('library-search').addEventListener('input', () => {
+  clearTimeout(libraryQueryTimer); libraryQueryTimer = setTimeout(() => { renderLibrary(); el('library-list').scrollTop = 0; }, 250);
+});
+el('library-search').addEventListener('keydown', event => {
+  if (event.key === 'ArrowDown' || event.key === 'Tab' && !event.shiftKey) {
+    const first = el('library-list').querySelector?.('button');
+    if (first) { event.preventDefault(); first.focus(); }
+  }
+});
+el('library-list').addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+  const items = [...el('library-list').querySelectorAll('.library-card, .toc-label')];
+  const index = items.indexOf(document.activeElement); if (index < 0) return;
+  const columns = libraryMode === 'grid' ? Math.max(1, Math.min(5, Math.floor(el('library-list').clientWidth / 250))) : 1;
+  const step = event.key === 'ArrowLeft' ? 1 : event.key === 'ArrowRight' ? -1 : event.key === 'ArrowDown' ? columns : -columns;
+  event.preventDefault();
+  if (event.key === 'ArrowUp' && index < columns) { el('library-search').focus(); return; }
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : Math.max(0, Math.min(items.length - 1, index + step));
+  items[next].focus(); items[next].scrollIntoView?.({ block: 'nearest' });
+});
+const librarySettingsPermissionMessage = 'כדי להתאים את תצוגת הספרייה לאוצריא, יש לאפשר קריאת הגדרות בהרשאות התוסף.';
+function applyLibraryMode(value) {
+  const mode = value === 'list' ? 'tree' : 'grid';
+  if (libraryMode === mode) return;
+  libraryMode = mode;
+  if (chooserOpen || !session) renderLibrary();
+}
+async function refreshLibraryMode() {
+  applyLibraryMode(await call('settings.get', { key: 'key-library-view-mode' }));
+  if (statusText === librarySettingsPermissionMessage) message();
+}
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(updateLibraryGeometry).observe(el('library-list'));
+async function showLibrary() {
   if (loading || sending) return;
   try {
     await initialized;
-    const state = await call('reader.getCurrentState');
-    const books = [], seen = new Set();
-    for (const tab of state?.openTabs ?? []) {
-      if (tab.type !== 'text' || tab.source !== 'library' || !tab.bookId) continue;
-      const key = tab.id != null ? `id:${tab.id}` : tab.bookId;
-      if (!seen.has(key)) { seen.add(key); books.push({ ...tab, key }); }
-    }
-    if (!books.length) throw new Error('אין ספרי טקסט מהספרייה פתוחים. פתחו ספר ונסו שוב.');
-    let chosen = books[0];
-    if (books.length > 1 || forceChoice) {
-      const previous = el('open-books').value;
-      chosen = books.find(book => book.key === previous);
-      const confirm = !el('book-picker').hidden && !!chosen;
-      const options = books.map(book => {
-        const option = document.createElement('option');
-        option.value = book.key; option.textContent = book.book ?? book.bookId;
-        return option;
-      });
-      el('open-books').replaceChildren(...options);
-      el('open-books').value = chosen?.key ?? books.find(book => book.id === state.currentId)?.key ?? books[0].key;
-      el('book-picker').hidden = false;
-      el('load-current').textContent = 'יבא את הספר הנבחר';
-      if (!confirm) { message(); el('open-books').focus(); return; }
-    }
-    requestBook({ selection: chosen, itemId: 'correct-book' }); await openings;
-  }
-  catch (error) { message(error.message, true); }
-}
-el('load-current').addEventListener('click', chooseOpenBook);
-el('change-book').addEventListener('click', async () => {
-  if (!session || loading || sending) return;
-  try {
-    await persist();
-    chooserOpen = true; render(); message();
-    await chooseOpenBook({ forceChoice: true });
+    captureView();
+    const tab = { id: newId() }; libraryTabs.push(tab);
+    activeLibraryId = tab.id; chooserOpen = true;
+    render(); restoreView(); message(); scheduleSave(); el('library-search').focus();
   } catch (error) { message(error.message, true); }
-});
+}
+el('change-book').addEventListener('click', showLibrary);
 el('cancel-book-picker').addEventListener('click', () => {
   if (loading || sending) return;
+  finishLibraryTab();
   chooserOpen = false; render(); restoreView(); message();
+  scheduleSave();
 });
 el('discard').addEventListener('click', async () => {
   if (loading || sending) return;
@@ -478,21 +668,63 @@ el('editor').addEventListener('submit', async event => {
 });
 async function initialize(boot) {
   applyTheme(boot?.theme);
-  const results = await Promise.allSettled([call('app.getTheme'), call('storage.get', { key: 'book-session' })]);
+  const results = await Promise.allSettled([call('app.getTheme'), call('storage.get', { key: 'book-session' }),
+    call('settings.get', { key: 'key-library-view-mode' })]);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
+  if (results[2].status === 'fulfilled') libraryMode = results[2].value === 'list' ? 'tree' : 'grid';
   const stored = results[1].value;
   sessions = stored?.schemaVersion === 2 ? stored.sessions : stored ? [stored] : [];
+  libraryTabs = stored?.libraryTabs ?? [];
+  activeLibraryId = libraryTabs.some(item => item.id === stored?.activeLibraryId) ? stored.activeLibraryId : null;
+  chooserOpen = !!activeLibraryId;
   for (const item of sessions) if (item.queue?.length && item.queue.every(report => report.sent)) item.completed = true;
   session = sessions.find(item => item.id === stored?.activeId) ?? sessions[0] ?? null;
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
+  for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
-  message();
+  if (!session) {
+    message('טוען את הספרייה…');
+    libraryTree = sortLibraryTree(await call('library.getTree', { includeBooks: true }));
+    if (chooserOpen) restoreView(); else renderLibrary();
+    el('library-search').focus();
+  } else {
+    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(tree); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
+  }
+  message(results[2].status === 'rejected' ? librarySettingsPermissionMessage : '', results[2].status === 'rejected');
+}
+async function updateNikudDisplay(item) {
+  const hidden = await readNikudDisplay(call, item.book).catch(() => item.hideNikud ?? false);
+  if (hidden === !!item.hideNikud) return false;
+  item.hideNikud = hidden;
+  if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
+  return true;
+}
+async function refreshActiveDisplay() {
+  await initialized;
+  if (!session || chooserOpen || loading || sending) return;
+  const item = session;
+  captureView();
+  if (await updateNikudDisplay(item) && item === session && !chooserOpen && !loading && !sending) {
+    // Capture again after the RPC: editing may have continued while it ran.
+    captureView();
+    if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
+    render(); restoreView(); scheduleSave();
+  }
+  initializeVisibleEditor();
 }
 if (host) {
-  host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook); host.on('reader.toolbar_item_clicked', requestBook);
-  host.on('plugin.suspended', () => { if (session) { captureView(); persist().catch(error => message(error.message, true)); } });
-  host.on('plugin.resumed', () => { initialized?.then(initializeVisibleEditor).catch(error => message(error.message, true)); });
+  host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook);
+  host.on('settings.changed', event => { if (event.key === 'key-library-view-mode') applyLibraryMode(event.newValue); });
+  host.on('plugin.permissions_changed', event => {
+    if (event.permissions?.includes('settings.read')) initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
+  });
+  host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') showLibrary(); });
+  host.on('plugin.suspended', () => { if (session || libraryTabs.length) { captureView(); persist().catch(error => message(error.message, true)); } });
+  host.on('plugin.resumed', () => {
+    initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
+    refreshActiveDisplay().catch(error => message(error.message, true));
+  });
   host.on('plugin.boot', boot => { initialized ??= initialize(boot); initialized.catch(error => message(error.message, true)); });
   if (host._booted) { initialized ??= initialize(); initialized.catch(error => message(error.message, true)); }
 } else { el('empty').hidden = false; message('יש לפתוח את התוסף מתוך אוצריא.'); }

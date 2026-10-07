@@ -7,19 +7,18 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><span id="location"></span><button id="change-book" type="button" class="icon-button" aria-label="פתח ספר נוסף" title="פתח ספר נוסף" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
+  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><button id="change-book" type="button" class="icon-button" aria-label="פתח ספר נוסף" title="פתח ספר נוסף" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
   <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
   <main>
     <p id="status" role="status" aria-live="polite">טוען…</p>
     <section id="empty" hidden>
-      <h1>תיקון ספר</h1>
-      <p>פתחו ספר טקסט ובחרו „העבר את הספר לתיקון” בלחיצה ימנית או בסרגל הספר.</p>
-      <div id="book-picker" hidden>
-        <label for="open-books">איזה ספר לייבא לתיקון?</label>
-        <select id="open-books" aria-label="ספרים פתוחים"></select>
+      <div class="library-toolbar">
+        <label for="library-search" class="sr-only">איתור ספר או מחבר בספרייה</label>
+        <input id="library-search" type="search" placeholder="איתור ספר או מחבר בספרייה" autocomplete="off">
+        <button id="cancel-book-picker" type="button" class="ghost" hidden>חזור לספר</button>
       </div>
-      <button id="load-current" type="button">טען את הספר הפתוח</button>
-      <button id="cancel-book-picker" type="button" class="ghost" hidden>חזור לספר</button>
+      <nav id="library-breadcrumbs" aria-label="מיקום בספרייה"></nav>
+      <nav id="library-list" aria-label="ספריית אוצריא"></nav>
     </section>
     <form id="editor" role="tabpanel" hidden>
       <div class="editor-layout">

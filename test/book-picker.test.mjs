@@ -13,7 +13,7 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     fire(name) { return this.handlers.get(name)?.({ preventDefault() {} }); }
   }
   const elements = new Map(), loaded = [], storage = new Map();
-  let confirmClose = false, failSave = false;
+  let confirmClose = false, failSave = false, readerQueries = 0;
   const content = { ראשון: 'תוכן הספר הראשון', שני: 'תוכן הספר השני' };
   const titles = { ראשון: 'ספר ראשון', שני: 'ספר שני' };
   const el = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -27,7 +27,8 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
   globalThis.document = { getElementById: el, querySelector: () => el('main'), createElement: () => new Element(), documentElement: { style: { setProperty() {} } } };
   globalThis.window = { Otzaria: { _booted: true, on() {}, async call(method, args = {}) {
     let data = null;
-    if (method === 'reader.getCurrentState') data = { currentId: 1, openTabs: tabs };
+    if (method === 'reader.getCurrentState') { readerQueries++; data = { currentId: 1, openTabs: tabs }; }
+    if (method === 'library.getTree') data = { title: 'ספריית אוצריא', path: '/', categories: [], books: tabs.filter(tab => tab.type === 'text').filter((tab,index,books) => books.findIndex(book => book.id === tab.id) === index).map(tab => ({ ...tab, title: tab.book })) };
     if (method === 'library.getBookDetails') {
       loaded.push(args);
       data = { title: titles[args.bookId], lineCount: 1, type: 'text', source: 'library' };
@@ -46,51 +47,50 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
   } } };
   try {
     await import('../plugin/app.js?book-picker');
-    await new Promise(resolve => setImmediate(resolve));
-    await el('load-current').fire('click');
-    assert.equal(loaded.length, 0, 'multiple books must not silently choose the active book');
-    assert.equal(el('book-picker').hidden, false);
-    assert.deepEqual(el('open-books').children.map(option => option.textContent), ['ספר ראשון', 'ספר שני']);
-    el('open-books').value = 'id:2';
-    await el('load-current').fire('click');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const choose = async index => { await el('library-list').children[0].children[index].fire('click'); };
+    assert.equal(el('empty').hidden, false);
+    assert.equal(readerQueries, 0, 'home must load the library without querying open reader tabs');
+    assert.equal(el('library-list').children[0].children.length, 2);
+    await choose(1);
     assert.deepEqual(loaded, [{ bookId: 'שני', bookUid: 'id:2' }]);
-    assert.equal(el('location').textContent, titles.שני);
+    assert.equal(el('screen-title').textContent, titles.שני);
     assert.equal(el('nav-title').textContent, titles.שני);
     assert.equal(el('screen-title').textContent, titles.שני);
     assert.equal(el('proposed').value, content.שני);
     assert.equal(el('toc-list').children[0].children[0].children[0].textContent, 'כותרת שני');
-    assert.equal(el('book-picker').hidden, true);
+    assert.equal(el('empty').hidden, true);
 
     await el('change-book').fire('click');
-    assert.equal(el('book-picker').hidden, false);
-    assert.equal(el('empty').hidden, false, 'chooser occupies the centered empty area');
+    assert.equal(el('empty').hidden, false, 'adding a book returns to the library home');
+    assert.equal(el('book-tabs').children.length, 2, 'plus adds a library tab beside the book');
+    assert.equal(el('book-tabs').children[1].children[0].textContent, 'ספריית אוצריא');
+    assert.equal(el('book-tabs').hidden, false, 'open tabs remain visible in the library');
     assert.equal(el('editor').hidden, true);
-    assert.deepEqual(el('open-books').children.map(option => option.textContent), ['ספר ראשון', 'ספר שני']);
+    assert.equal(el('library-list').children[0].children.length, 2);
     await el('cancel-book-picker').fire('click');
-    assert.equal(el('book-picker').hidden, true);
+    assert.equal(el('empty').hidden, true);
     assert.equal(el('editor').hidden, false);
     assert.equal(el('proposed').value, content.שני);
     assert.equal(el('nav-title').textContent, titles.שני);
 
     await el('change-book').fire('click');
-    el('open-books').value = 'id:1';
-    await el('load-current').fire('click');
+    await choose(0);
+    assert.equal(el('book-tabs').children.length, 2, 'choosing a book replaces the active library tab');
     assert.equal(loaded[1].bookId, 'ראשון');
     assert.equal(el('proposed').value, content.ראשון);
-    assert.equal(el('location').textContent, titles.ראשון);
+    assert.equal(el('screen-title').textContent, titles.ראשון);
     assert.equal(el('nav-title').textContent, titles.ראשון);
     assert.equal(el('screen-title').textContent, titles.ראשון);
     assert.equal(el('toc-list').children[0].children[0].children[0].textContent, 'כותרת ראשון');
 
     await el('change-book').fire('click');
-    el('open-books').value = 'id:2';
-    await el('load-current').fire('click');
+    await choose(1);
     assert.equal(el('proposed').value, content.שני);
     el('proposed').value = 'תיקון שטרם נשלח';
     el('proposed').fire('input');
     await el('change-book').fire('click');
-    el('open-books').value = 'id:1';
-    await el('load-current').fire('click');
+    await choose(0);
     assert.equal(loaded.length, 2, 'already-open books reuse their own drafts without reloading');
     assert.equal(el('proposed').value, content.ראשון);
     assert.equal(el('screen-title').textContent, titles.ראשון);
@@ -103,7 +103,11 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     assert.equal(el('proposed').value, 'תיקון שטרם נשלח');
     failSave = true;
     await el('book-tabs').children[1].children[0].fire('click');
-    assert.equal(el('proposed').value, 'תיקון שטרם נשלח', 'failed save must prevent tab switching');
+    assert.equal(el('proposed').value, content.ראשון, 'switch does not wait for storage');
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.match(el('status').textContent, /שמירת הטיוטה נכשלה/);
+    await secondTab().fire('click');
+    assert.equal(el('proposed').value, 'תיקון שטרם נשלח', 'failed background save preserves the draft in memory');
     failSave = false;
     await el('book-tabs').children[0].children[1].fire('click');
     assert.equal(el('book-tabs').children.length, 2, 'canceling close preserves unsent draft');
@@ -113,12 +117,9 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     assert.equal(el('proposed').value, content.ראשון);
     await el('discard').fire('click');
     tabs = [tabs[0]];
-    await el('load-current').fire('click');
+    await choose(0);
     assert.equal(loaded[2].bookId, 'ראשון');
     await el('discard').fire('click');
-    tabs = [{ type: 'pdf', source: 'library', bookId: 'סריקה' }];
-    await el('load-current').fire('click');
-    assert.equal(loaded.length, 3);
-    assert.match(el('status').textContent, /אין ספרי טקסט/);
+    assert.equal(readerQueries, 0);
   } finally { delete globalThis.document; delete globalThis.window; }
 });

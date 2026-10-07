@@ -42,13 +42,14 @@ export async function buildReport(draft, email) {
   const index = selection.sectionIndex ?? selection.currentIndex;
   if (!Number.isInteger(index) || index < 0) throw new Error('מיקום הקטע חסר. סמנו אותו מחדש.');
   const title = selection.bookTitle ?? selection.currentBook ?? selection.bookId;
-  const ref = selection.currentRef ?? '';
+  const ref = selection.currentRef?.trim() || `פסקה ${index + 1}`;
+  const location = `ספר: ${title}\nמיקום: ${ref}\nמספר שורה במקור: ${index + 1}`;
   const proposedDisplay = draft.proposed === '' ? '(מחיקה)' : draft.proposed;
   const fallback = `--- הצעת תיקון ---\nמקור: ${original}\nמוצע: ${proposedDisplay}`;
   const payload = {
     report_id: draft.id, sender_email: email, subject: `הצעת תיקון: ${title}`.slice(0, 500),
     book_title: title.slice(0, 300), current_ref: ref.slice(0, 300), line_number: index + 1,
-    selected_text: original, error_details: draft.note ? `${draft.note}\n\n${fallback}` : fallback,
+    selected_text: original, error_details: `${location}\n\n${draft.note ? `${draft.note}\n\n` : ''}${fallback}`,
     context_text: line, file_path: draft.details.libraryPath ?? '',
     source_folder: draft.details.textSource?.key ?? '', library_version: 'unknown',
     created_at: draft.createdAt
@@ -82,5 +83,10 @@ export async function sendReport(host, payload) {
   let response;
   try { response = JSON.parse(body); } catch { throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.'); }
   if (response?.success !== true) throw new Error('השרת לא אישר את קבלת הדיווח. התיקון נשמר.');
+  // Intake success does not imply email delivery. Retry with the same report ID:
+  // the server can retry its notification without creating another report.
+  if (response.email_sent === false && response.duplicate !== true) {
+    throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען. התיקון נשמר לניסיון חוזר.');
+  }
   return response;
 }

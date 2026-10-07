@@ -14,6 +14,7 @@ test('installed entrypoint runs a classic bundle and initializes after delayed S
   function el(id) {
     if (!elements.has(id)) elements.set(id, {
       value: '', textContent: id === 'status' ? 'טוען…' : '', hidden: true,
+      style: { setProperty() {} }, children: [], append(...children) { this.children.push(...children); },
       classList: { toggle() {} }, addEventListener() {}, focus() {}, replaceChildren() {}, setAttribute() {}
     });
     return elements.get(id);
@@ -24,12 +25,12 @@ test('installed entrypoint runs a classic bundle and initializes after delayed S
     async call(method) {
       assert.equal(booted, true, 'RPC must wait for SDK boot');
       calls++;
-      const data = method === 'app.getUserEmail' ? { email: 'reader@example.com' } : null;
+      const data = method === 'library.getTree' ? { title: 'ספריית אוצריא', path: '/', categories: [], books: [] } : null;
       return { success: true, data };
     }
   };
   runInNewContext(bundle, {
-    window: { Otzaria: host }, document: { getElementById: el, querySelector: () => el('main'), documentElement: { style: { setProperty() {} } } },
+    window: { Otzaria: host }, document: { getElementById: el, createElement: () => el(`created-${elements.size}`), querySelector: () => el('main'), documentElement: { style: { setProperty() {} } } },
     crypto: webcrypto, TextEncoder, setTimeout, clearTimeout, console
   }, { filename: 'app.bundle.js' });
   assert.equal(calls, 0);

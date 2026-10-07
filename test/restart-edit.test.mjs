@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 test('a restored failed submission remains editable and changed text replaces only unsent reports', async () => {
   class Element {
     value = ''; textContent = ''; hidden = true; readOnly = false; disabled = false;
-    handlers = new Map(); classList = { toggle() {} }; style = { setProperty() {} };
-    append() {} replaceChildren() {} setAttribute() {} focus() {}
+    handlers = new Map(); children = []; classList = { toggle() {} }; style = { setProperty() {} };
+    append(...children) { this.children.push(...children); } replaceChildren(...children) { this.children = children; } setAttribute() {} focus() {}
     addEventListener(name, handler) { this.handlers.set(name, handler); }
     fire(name) { return this.handlers.get(name)?.({ preventDefault() {} }); }
   }
@@ -26,6 +26,8 @@ test('a restored failed submission remains editable and changed text replaces on
       let data = null;
       if (method === 'storage.get') data = structuredClone(storage.get(args.key));
       else if (method === 'storage.set') storage.set(args.key,structuredClone(args.value));
+      else if (method === 'settings.get') data = 'grid';
+      else if (method === 'library.getTree') data = { title: 'ספריית אוצריא', path: '/', categories: [], books: [] };
       else if (method === 'app.getUserEmail') data = {email:'user@example.com'};
       else if (method === 'reader.getSectionTextMap') data = {sourceText:book.sections[args.sectionIndex].text};
       else if (!['app.getTheme','ui.setUnsavedChanges'].includes(method)) throw new Error(`Unexpected method: ${method}`);

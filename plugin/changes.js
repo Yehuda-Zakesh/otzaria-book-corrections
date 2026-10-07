@@ -61,7 +61,7 @@ function changedRuns(a, b, operations, offset, refine) {
   return changes;
 }
 
-function diffCharacters(original, proposed, offset) {
+function diffCharacters(original, proposed, offset, mergeWords = true) {
   const { start, end, nextEnd } = commonEdges(original, proposed);
   const before = original.slice(start, end), after = proposed.slice(start, nextEnd);
   if (!before && !after) return [];
@@ -74,7 +74,7 @@ function diffCharacters(original, proposed, offset) {
     const gap = previous ? original.slice(previous.end - offset, hunk.start - offset) : '';
     // Shared letters inside a changed word should not turn one correction into
     // several tiny reports. Whitespace keeps independently edited words apart.
-    if (previous && !/\s/u.test(gap)) {
+    if (mergeWords && previous && !/\s/u.test(gap)) {
       previous.original += gap + hunk.original;
       previous.proposed += gap + hunk.proposed;
       previous.end = hunk.end;
@@ -83,13 +83,13 @@ function diffCharacters(original, proposed, offset) {
   return merged;
 }
 
-export function diffBook(original, edited) {
+export function diffBook(original, edited, { mergeWords = true } = {}) {
   if (typeof original !== 'string' || typeof edited !== 'string') throw new TypeError('Book text must be a string');
   if (original === edited) return [];
   const { start, end, nextEnd } = commonEdges(original, edited);
   const before = original.slice(start, end), after = edited.slice(start, nextEnd);
   const a = before.match(/[^\n]*\n|[^\n]+$/g) ?? [], b = after.match(/[^\n]*\n|[^\n]+$/g) ?? [];
   const operations = editRuns(a, b);
-  if (!operations) return diffCharacters(before, after, start);
-  return changedRuns(a, b, operations, start, diffCharacters);
+  if (!operations) return diffCharacters(before, after, start, mergeWords);
+  return changedRuns(a, b, operations, start, (a, b, offset) => diffCharacters(a, b, offset, mergeWords));
 }

@@ -4,7 +4,6 @@ html, body { height: 100%; overflow: hidden; }
 body { margin: 0; display: flex; flex-direction: column; font: 14px var(--font-ui); background: var(--surface); color: var(--onSurface); }
 .topbar { height: 56px; flex-shrink: 0; padding: 8px 16px; display: flex; align-items: center; gap: 16px; background: var(--surfaceContainerHigh); }
 .topbar strong { font-size: 16px; font-weight: 600; white-space: nowrap; }
-#location { font-size: 12px; color: var(--onSurfaceVariant); overflow-wrap: anywhere; }
 #send { margin-inline-start: auto; white-space: nowrap; }
 #book-tabs { display: flex; flex-shrink: 0; height: 40px; padding-inline: 15px; overflow-x: auto; background: var(--surface); }
 .book-tab { position: relative; display: flex; align-items: center; flex: 0 1 220px; min-width: 100px; margin: 4px 6px 0; padding-bottom: 4px; border-radius: 8px 8px 0 0; color: var(--onSurface); }
@@ -22,9 +21,33 @@ button.book-tab-close:hover { background: color-mix(in srgb, var(--onSurface) 8%
 @media (pointer: coarse) { button.book-tab-close { opacity: 1; } }
 main { padding: 24px; width: 100%; margin: 0; overflow: auto; flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
 main.reading { padding: 0; overflow: hidden; }
-#empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
-#empty h1, #empty p { margin: 0; }
-#book-picker { width: min(100%, 380px); display: grid; gap: 8px; text-align: start; }
+main:has(#empty:not([hidden])) { padding: 0; overflow: hidden; background: color-mix(in srgb, var(--surfaceContainerHighest, var(--surfaceContainerHigh)) 47.5%, var(--surface)); }
+html[style*="color-scheme: dark"] main:has(#empty:not([hidden])) { background: #000; }
+#empty { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.library-toolbar { display: flex; align-items: center; gap: 8px; padding: 12px 30px; flex-shrink: 0; background: var(--surfaceContainerHigh); }
+#library-search { max-width: 400px; min-width: 0; border: 0; border-radius: 24px; min-height: 48px; padding: 12px 16px; background: color-mix(in srgb, var(--onSurface) 7%, var(--surfaceContainerHigh)); }
+#cancel-book-picker { margin-inline-start: auto; white-space: nowrap; }
+#library-breadcrumbs { display: flex; align-items: center; gap: 4px; flex-shrink: 0; min-height: 36px; overflow-x: auto; padding: 4px 12px 0; }
+#library-breadcrumbs button { background: transparent; color: var(--onSurfaceVariant); min-height: 28px; padding: 4px 6px; font-size: 12px; white-space: nowrap; }
+#library-breadcrumbs button[aria-current="page"] { color: var(--primary); font-weight: 600; }
+#library-list { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 24px 30px 30px; }
+.library-grid { display: grid; grid-template-columns: repeat(var(--columns, 1), minmax(0, 1fr)); gap: 14px; }
+button.library-card { display: flex; align-items: center; gap: 18px; width: 100%; aspect-ratio: var(--card-ratio, 1.8); min-height: 112px; padding: 10px 14px; text-align: start; font-weight: 400; background: var(--surface); color: var(--onSurface); }
+html[style*="color-scheme: dark"] button.library-card { background: var(--surfaceContainer, var(--surface)); }
+.library-card:hover, .library-card:focus-visible { background: color-mix(in srgb, var(--onSurface) 8%, var(--surface)) !important; }
+html[style*="color-scheme: dark"] .library-card:hover, html[style*="color-scheme: dark"] .library-card:focus-visible { background: color-mix(in srgb, var(--onSurface) 8%, var(--surfaceContainer, var(--surface))) !important; }
+.library-text { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.library-name { font-size: 16px; font-weight: 700; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.library-author { color: var(--secondary, var(--onSurfaceVariant)); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-icon { width: 32px; height: 32px; flex: 0 0 32px; display: grid; place-items: center; background: var(--secondaryContainer); color: var(--onSecondaryContainer); border-radius: 8px; }
+.library-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.library-group { margin: 2px 0; }
+#library-list .toc-row { padding-inline-start: calc(12px + var(--level, 0) * 18px); }
+#library-list .toc-row .library-icon { width: 26px; height: 26px; flex-basis: 26px; }
+#library-list .toc-label { font-size: 16px; font-weight: 600; }
+#library-list .toc-row[style*="--level: 0"] .toc-label { font-weight: 700; }
+.library-no-results { text-align: center; color: var(--onSurfaceVariant); padding: 32px; }
+@media (max-width: 600px) { .library-toolbar { padding: 8px 12px; flex-wrap: wrap; } #library-search { max-width: none; flex: 1 1 180px; } #library-list { padding-inline: 14px; } }
 [hidden] { display: none !important; }
 h1 { font-size: 18px; font-weight: 500; }
 p { line-height: 1.6; }
@@ -92,4 +115,4 @@ button.icon-button { width: 32px; height: 32px; min-height: 32px; padding: 6px; 
 #change-book svg { width: 18px; height: 18px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (max-width: 720px) { .book-navigation { width: 250px; flex-basis: 250px; } #editor-canvas { --book-padding: 20px; --book-inline-padding: 20px; } main.reading #status { max-width: calc(100% - 280px); } }
-@media (max-width: 480px) { .topbar { height: 44px; padding: 4px 8px; gap: 8px; } .topbar strong { font-size: 14px; } #location { display: none; } main { padding: 16px; } .book-navigation { width: 180px; flex-basis: 180px; } .nav-header { padding-inline: 8px; } #toc-list { padding-inline: 8px; } #editor-canvas { --book-padding: 16px; --book-inline-padding: 16px; } main.reading #status { max-width: calc(100% - 200px); } }
+@media (max-width: 480px) { .topbar { height: 44px; padding: 4px 8px; gap: 8px; } .topbar strong { font-size: 14px; } main { padding: 16px; } .book-navigation { width: 180px; flex-basis: 180px; } .nav-header { padding-inline: 8px; } #toc-list { padding-inline: 8px; } #editor-canvas { --book-padding: 16px; --book-inline-padding: 16px; } main.reading #status { max-width: calc(100% - 200px); } }

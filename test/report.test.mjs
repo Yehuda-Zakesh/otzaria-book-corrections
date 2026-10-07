@@ -37,10 +37,23 @@ test('builds legacy error report with both texts, source routing and 1-based lin
   assert.equal(payload.report_id, 'stable-id');
   assert.equal(payload.source_folder, 'Sefaria');
   assert.equal(payload.context_text, line);
+  assert.equal(payload.current_ref, 'פרק ג');
+  assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פרק ג\nמספר שורה במקור: 43\n\n'));
   assert.equal(payload.selected_text, 'אָב');
   assert.match(payload.error_details, /מקור: אָב\nמוצע: אֵם/);
   assert.equal('correction' in payload, false);
   assert.equal('selection_offset' in payload, false);
+});
+test('missing or blank references retain a readable source location in the report body', async () => {
+  for (const currentRef of [undefined, null, '', '   ']) {
+    const value = draft();
+    value.selection = { ...selection, currentRef };
+    value.note = 'הערת המדווח';
+    const payload = await buildReport(value, 'me@example.com');
+    assert.equal(payload.current_ref, 'פסקה 43');
+    assert.equal(payload.line_number, 43);
+    assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פסקה 43\nמספר שורה במקור: 43\n\nהערת המדווח\n\n'));
+  }
 });
 test('preserves whitespace, nikud and punctuation without normalization', async () => {
   const payload = await buildReport(draft(' אֵם!\n'), 'me@example.com');
@@ -85,6 +98,20 @@ test('retries the same payload with the same id and accepts duplicate receipt', 
 });
 test('a content-filter HTML page with status 200 is not a successful send', async () => {
   await assert.rejects(sendReport(host(200, '<html>blocked</html>'), {}));
+});
+
+test('intake success with failed email remains retryable using the same report id', async () => {
+  const seen = [], payload = await buildReport(draft(), 'me@example.com');
+  await assert.rejects(sendReport(host(200, JSON.stringify({ success: true, accepted: true,
+    savedToDatabase: true, email_sent: false, duplicate: false }), seen), payload), /המייל לנמען/);
+  const response = await sendReport(host(200, JSON.stringify({ success: true, email_sent: true }), seen), payload);
+  assert.equal(response.email_sent, true);
+  assert.equal(seen[0].args.body, seen[1].args.body);
+});
+
+test('email deduplication is a receipt for an already emailed report', async () => {
+  const response = await sendReport(host(200, '{"success":true,"email_sent":false,"duplicate":true}'), {});
+  assert.equal(response.duplicate, true);
 });
 test('an explicit server failure, 409 and 429 retain the report', async () => {
   await assert.rejects(sendReport(host(200, '{"success":false}'), {}));
