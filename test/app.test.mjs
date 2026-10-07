@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { storedWorkspace } from './stored-workspace.mjs';
 
 test('full book: partial delivery, persistent queue, reload retry, click guard and failed discard', async () => {
   class Element {
@@ -14,8 +15,8 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
   }
   const storage = new Map(), requests = [];
   let elements, events, failRemove = false, emailReads = 0, savedEmail = 'user@example.com';
-  const savedSession = () => { const workspace = storage.get('book-session'); return workspace?.sessions.find(item => item.id === workspace.activeId); };
-  const raw = 'אב\nגד';
+  const savedSession = () => { const workspace = storedWorkspace(storage); return workspace?.sessions.find(item => item.id === workspace.activeId); };
+  let raw = 'אב\nגד';
   function setup() {
     elements = new Map(); events = new Map();
     globalThis.document = {
@@ -113,10 +114,16 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(el('proposed').readOnly, true);
     assert.equal(el('send').textContent, 'המשך שליחה');
     assert.match(el('status').textContent, /העריכה נעולה זמנית/,'restored locked editor explains the reason and recovery');
+    raw = 'אב\nמקור מעודכן';
+    await el('editor').fire('submit');
+    assert.equal(requests.length, 2, 'restored pending reports cannot send against changed source');
+    assert.match(el('status').textContent, /מקור הספר השתנה/);
+    assert.equal(savedSession().editedText, 'אם\nגה', 'source mismatch preserves the correction draft');
+    raw = 'אב\nגד';
     const retry = el('editor').fire('submit'); await waitForRequests(3);
     assert.deepEqual(requests[1].args, requests[2].args, 'legacy retry keeps the complete report payload');
     assert.equal(requests[2].args.report_id, secondPayload.report_id);
-    assert.equal(emailReads, 3, 'each submit reads current settings without adding an email dialog');
+    assert.equal(emailReads, 4, 'each submit reads current settings without adding an email dialog');
     await el('editor').fire('submit'); assert.equal(requests.length, 3);
     requests[2].release(200); await retry;
     assert.equal(savedSession().completed, true);
@@ -133,11 +140,15 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     const additionalPayload = requests[3].args;
     assert.notEqual(additionalPayload.report_id, secondPayload.report_id);
     requests[3].release(409); await additional;
+    await new Promise(resolve => setTimeout(resolve, 3100));
+    assert.match(el('status').textContent, /מזהה הדיווח/, 'a newer error survives the previous success notice timer');
     assert.notEqual(savedSession().queue[0].payload.report_id, additionalPayload.report_id);
     const conflictRetry = el('editor').fire('submit'); await waitForRequests(5);
     assert.notEqual(requests[4].args.report_id, additionalPayload.report_id);
     assert.equal(requests[4].args.selected_text, additionalPayload.selected_text);
     requests[4].release(200); await conflictRetry;
+    await new Promise(resolve => setTimeout(resolve, 3100));
+    assert.equal(el('status').textContent, '', 'success notice disappears after three seconds');
     setup();
     await import('../plugin/app.js?fullbook-completed-reload'); await settle();
     assert.equal(el('proposed').readOnly, false, 'completed drafts remain editable after reload');

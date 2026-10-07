@@ -61,7 +61,7 @@ export async function prepareReports(session, changes, email, call, idFactory, o
         selection: { bookTitle: session.book.details.title ?? session.book.identity.bookId,
           bookId: session.book.identity.bookId, sectionIndex: first.index, currentRef: map.currentRef ?? '' }
       }, email);
-      queue.push({ payload, sent: false });
+      queue.push({ payload, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
     }
     onProgress(i + 1, changes.length);
   }

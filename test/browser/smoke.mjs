@@ -27,6 +27,16 @@ window.mockTheme = { mode:'light', colorScheme:{primary:'#6750a4',onPrimary:'#ff
 window.mockReports = [];
 window.mockEmail = 'mock@example.com';
 window.mockLines = ['טקסט מקורי', 'פסקה שנייה'];
+window.mockStorage = new Map();
+window.mockWorkersCreated=0;
+const NativeWorker=window.Worker;
+window.Worker=class extends NativeWorker {constructor(...args){super(...args);window.mockWorkersCreated++;}};
+window.mockHydrate = index => ({...index,schemaVersion:2,sessions:index.sessions.map(ref=>{
+const book=window.mockStorage.get(ref.bookKey),draft=window.mockStorage.get(ref.draftKey);
+const {editedPatch,reportedPatch,...state}=draft;
+const restore=p=>{if(!Array.isArray(p))return book.originalText.slice(0,p.start)+p.text+book.originalText.slice(p.end);const parts=[];let cursor=0;for(const c of p){parts.push(book.originalText.slice(cursor,c.start),c.text);cursor=c.end;}parts.push(book.originalText.slice(cursor));return parts.join('');};
+return {...state,book:{...book,sections:book.sections.map(s=>({...s,text:book.originalText.slice(s.start,s.end)}))},editedText:restore(editedPatch),...(reportedPatch?{reportedText:restore(reportedPatch)}:{})};
+})});
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
 if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); if(window.mockNetworkFails) throw new Error('Network unavailable'); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify(window.mockEmailFails ? {success:true,accepted:true,savedToDatabase:true,email_sent:false,duplicate:false} : {success:true})}; })();
 return (async()=>{ let data = null;
@@ -37,8 +47,9 @@ else if(method==='ui.showConfirm') data={confirmed:window.mockConfirmClose===tru
 else if(method==='reader.getCurrentState') data={currentId:1,openTabs:[{id:1,bookId:'mock-book',book:'ספר בדיקה',source:'library',type:'text'},{id:2,bookId:'second-book',book:'ספר שני',source:'library',type:'text'}]};
 else if(method==='library.getTree') data={title:'ספריית אוצריא',path:'/',categories:[{title:'חסידות',path:'/חסידות',order:0,categories:[],books:[{bookId:'extra',title:'נוסף',source:'library',type:'pdf'}]},{title:'תנ״ך',path:'/תנך',order:999,categories:[],books:[{id:99,bookUid:'id:99',bookId:'library-only',title:'ספר שאינו פתוח',source:'library',author:'מחבר לדוגמה',type:'text'},...Array.from({length:80},(_,i)=>({bookId:'other-'+i,title:'ספר נוסף '+i,source:'library',type:'pdf'}))]},{title:'Personal books',path:'/user',categories:[],books:[{bookId:'private',title:'Private book',source:'user',type:'text'}]}],books:[{bookId:'attached',title:'Attached book',source:'attached',type:'text'}]};
 else if(method==='reader.openBook') window.mockOpenedBook=args;
-else if(method==='storage.get' && args.key==='book-session') data=window.mockStoredSession ?? null;
-else if(method==='storage.set' && args.key==='book-session') { if(window.mockStorageDelay) await new Promise(resolve=>setTimeout(resolve,window.mockStorageDelay)); window.mockWorkspace=args.value; window.mockStoredSession=args.value.sessions.find(item=>item.id===args.value.activeId); }
+else if(method==='storage.get') data=args.key==='book-session' ? window.mockIndex ?? window.mockStoredSession ?? null : window.mockStorage.get(args.key) ?? null;
+else if(method==='storage.set') { if(window.mockStorageDelay) await new Promise(resolve=>setTimeout(resolve,window.mockStorageDelay)); window.mockStorage.set(args.key,structuredClone(args.value)); if(args.key==='book-session') {window.mockIndex=args.value;window.mockWorkspace=window.mockHydrate(args.value);window.mockStoredSession=window.mockWorkspace.sessions.find(item=>item.id===args.value.activeId);} }
+else if(method==='storage.remove') {window.mockStorage.delete(args.key);if(args.key==='book-session'){window.mockIndex=null;window.mockStoredSession=null;window.mockWorkspace=null;}}
 else if(method==='reader.getSectionTextMap') {
 const sourceText=(args.bookId==='second-book'?window.secondLines:mockLines)[args.sectionIndex];
 data={sourceText,currentRef:'פסקה '+(args.sectionIndex+1)};
@@ -166,6 +177,9 @@ for (let attempt = 0; attempt < 70; attempt++) {
 }
 const submission = await evaluate(`({ status:document.getElementById('status').textContent, sendDisabled:document.getElementById('send').disabled, mockReports:window.mockReports })`);
 assert.match(submission.status, /נשלחו בהצלחה/);
+await new Promise(resolve => setTimeout(resolve, 3200));
+assert.equal(await evaluate(`document.getElementById('status').textContent`), '', 'successful submission notice dismisses automatically');
+assert.equal(await evaluate(`getComputedStyle(document.getElementById('status')).display`), 'none', 'dismissed notice leaves no visible badge');
 assert.equal(submission.sendDisabled, true);
 assert.ok(submission.mockReports.length >= 2);
 assert.ok(submission.mockReports.some(report => report.line_number === 1));
@@ -391,6 +405,15 @@ const layoutComparison = await evaluate(`(()=>{
   const measure=value=>{const t=performance.now();e.value=value; const height=e.scrollHeight; e.scrollTop=height/2; return performance.now()-t;};
   const fullMs=measure(text),chunkMs=measure(chunk); return {characters:text.length,fullMs,chunkMs,renderedCharacters:chunk.length};
 })()`);
+// Large-book search uses an actual browser worker; query changes cannot leave
+// old results behind, and the UI gets an animation frame while work runs.
+await evaluate(`window.mockSearchFrames=0;document.getElementById('book-search').value='תוספת';document.getElementById('nav-search-tab').click();requestAnimationFrame(()=>window.mockSearchFrames++);`);
+await waitFor(`document.querySelectorAll('#book-search-results button').length>0`,'large search worker returns results');
+assert.ok(await evaluate(`window.mockWorkersCreated>0`),'large-book search starts a real Worker');
+assert.ok(await evaluate(`window.mockSearchFrames>0`),'UI frames continue while searching');
+await evaluate(`const q=document.getElementById('book-search');q.value='תיקון';q.dispatchEvent(new Event('input'));q.value='מחרוזתשאינהקיימת';q.dispatchEvent(new Event('input'));`);
+await waitFor(`document.getElementById('book-search-results').textContent==='לא נמצאו תוצאות'`,'latest query replaces earlier worker results');
+await evaluate(`document.getElementById('nav-toc-tab').click()`);
 // A pointed book follows the host's per-book policy while the draft remains
 // canonical. Use real textarea selection and native browser scrolling.
 await evaluate(`window.mockHideNikud=true;window.mockLines=Array.from({length:600},(_,i)=>'שָׁלוֹם בַּיִת '+i+' '+ 'מִלָּה '.repeat(20));mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'pointed-book',bookUid:'id:600',currentIndex:300}});`);
@@ -427,6 +450,23 @@ for(let attempt=0;attempt<50;attempt++){if(await evaluate(`!document.getElementB
 assert.equal(await evaluate(`document.getElementById('proposed').value.includes('ָ')`),false);
 const pointedScreenshot=await call('Page.captureScreenshot',{format:'png'});
 await writeFile(resolve('test/browser/plugin-hidden-nikud.png'),Buffer.from(pointedScreenshot.data,'base64'));
+// Reopen the actual schema-3 records rather than a hydrated legacy fixture.
+await new Promise(resolve=>setTimeout(resolve,600));
+const persistedState=await evaluate(`({index:mockIndex,entries:[...mockStorage],lines:mockLines,text:mockStoredSession.editedText,id:mockStoredSession.id})`);
+assert.equal(persistedState.index.schemaVersion,3);
+const schema3Boot=await call('Page.addScriptToEvaluateOnNewDocument',{source:`window.mockIndex=${JSON.stringify(persistedState.index)};window.mockStorage=new Map(${JSON.stringify(persistedState.entries)});window.mockLines=${JSON.stringify(persistedState.lines)};window.mockHideNikud=true;`});
+await call('Page.reload');
+await waitFor(`document.getElementById('section-number')?.max==='600' && document.getElementById('proposed')?.value.length>0`,'schema-3 source and patch records restore');
+await evaluate(`mockHandlers['plugin.suspended']()`);
+await waitFor(`window.mockStoredSession?.id===${JSON.stringify(persistedState.id)}`,'restored snapshot remains writable');
+assert.equal(await evaluate(`mockStoredSession.editedText`),persistedState.text);
+assert.equal(await evaluate(`document.getElementById('status').textContent`),'','source restoration check is silent');
+// Changing a middle source section blocks sending before the network is used.
+await evaluate(`window.mockLines[300]+=' שינוי במקור';document.getElementById('editor').requestSubmit()`);
+await waitFor(`document.getElementById('status').textContent.includes('מקור הספר השתנה')`,'changed source blocks queued or new submission');
+assert.equal(await evaluate(`mockReports.length`),0);
+assert.equal(await evaluate(`mockStoredSession.editedText`),persistedState.text,'blocked submission preserves the draft');
+await call('Page.removeScriptToEvaluateOnNewDocument',{identifier:schema3Boot.identifier});
 assert.equal(errors.length, 0, JSON.stringify(errors));
 console.log(JSON.stringify({ protocol:'file:', boot, homeGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, tabs:{count:2,independentDrafts:true,scrollRestored:true,selectionRestored:true,keyboardFocus:true,reloadRestored:true,closeCancellation:true}, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, exceptions:errors.length }, null, 2));
 ws.close();

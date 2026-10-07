@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { storedWorkspace } from './stored-workspace.mjs';
 
 test('a restored failed submission remains editable and changed text replaces only unsent reports', async () => {
   class Element {
@@ -26,6 +27,9 @@ test('a restored failed submission remains editable and changed text replaces on
       let data = null;
       if (method === 'storage.get') data = structuredClone(storage.get(args.key));
       else if (method === 'storage.set') storage.set(args.key,structuredClone(args.value));
+      else if (method === 'storage.remove') storage.delete(args.key);
+      else if (method === 'library.getBookDetails') data = { source:'library',type:'text',lineCount:2 };
+      else if (method === 'library.getBookContent') data = original.slice(args.offset,args.offset+args.limit);
       else if (method === 'settings.get') data = 'grid';
       else if (method === 'library.getTree') data = { title: 'ספריית אוצריא', path: '/', categories: [], books: [] };
       else if (method === 'app.getUserEmail') data = {email:'user@example.com'};
@@ -36,7 +40,7 @@ test('a restored failed submission remains editable and changed text replaces on
     return el;
   }
   const settle = () => new Promise(resolve=>setTimeout(resolve,150));
-  const saved = () => { const w=storage.get('book-session');return w.sessions.find(s=>s.id===w.activeId); };
+  const saved = () => { const w=storedWorkspace(storage);return w.sessions.find(s=>s.id===w.activeId); };
   let el = setup();
   try {
     await import('../plugin/app.js?failed-edit-first'); await settle();
@@ -60,7 +64,8 @@ test('a restored failed submission remains editable and changed text replaces on
     assert.doesNotMatch(requests[3].error_details,/מוצע: ם/);
     // A crash after the last acknowledgment but before completed=true cannot lock the restored book.
     const workspace=storage.get('book-session');
-    workspace.sessions[0].queue.forEach(item=>{item.sent=true;}); workspace.sessions[0].completed=false;
+    const draft = storage.get(workspace.sessions[0].draftKey);
+    draft.queue.forEach(item=>{item.sent=true;}); draft.completed=false;
     el = setup(); await import('../plugin/app.js?acknowledged-edit-restart'); await settle();
     assert.equal(el('proposed').readOnly,false); assert.equal(el('send').disabled,true);
     el('proposed').value='את\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));

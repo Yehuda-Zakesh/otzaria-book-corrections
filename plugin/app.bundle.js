@@ -445,7 +445,7 @@ async function prepareReports(session, changes, email, call, idFactory, onProgre
         selection: { bookTitle: session.book.details.title ?? session.book.identity.bookId,
           bookId: session.book.identity.bookId, sectionIndex: first.index, currentRef: map.currentRef ?? '' }
       }, email);
-      queue.push({ payload, sent: false });
+      queue.push({ payload, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
     }
     onProgress(i + 1, changes.length);
   }
@@ -453,9 +453,20 @@ async function prepareReports(session, changes, email, call, idFactory, onProgre
 }
 
 function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
-  let queue = Promise.resolve();
-  async function invoke(method, args) {
+  const urgent = [], normal = [];
+  let running = 0, background = 0, pumping = false;
+  let startGate = Promise.resolve(), hasStarted = false;
+  function reserveStart() {
+    const ready = startGate.then(async () => {
+      if (hasStarted) await sleep(interval);
+      hasStarted = true;
+    });
+    startGate = ready.catch(() => {});
+    return ready;
+  }
+  async function invoke(method, args, limited = true) {
     for (let attempt = 0; attempt < 4; attempt++) {
+      if (limited) await reserveStart();
       let result;
       try { result = await host.call(method, args); }
       catch (error) {
@@ -473,12 +484,30 @@ function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = ms => ne
       throw error;
     }
   }
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (running < 4 && (urgent.length || (background < 3 && normal.length))) {
+        const priority = urgent.length > 0;
+        const item = (priority ? urgent : normal).shift();
+        running++; if (!priority) background++;
+        // Space request starts, not completions. Slow library reads cannot
+        // occupy the slot reserved for persistence and unsaved-change state.
+        invoke(item.method, item.args).then(item.resolve, item.reject).finally(() => {
+          running--; if (!priority) background--; pump();
+        });
+      }
+    } finally { pumping = false; }
+  }
   return (method, args = {}) => {
     // Content chunks are explicitly exempt in the host; section maps and writes are not.
-    if (method === 'library.getBookContent') return invoke(method, args);
-    const request = queue.catch(() => {}).then(() => invoke(method, args));
-    queue = request.catch(() => {}).then(() => sleep(interval));
-    return request;
+    if (method === 'library.getBookContent') return invoke(method, args, false);
+    return new Promise((resolve, reject) => {
+      const priority = method.startsWith('storage.') || method === 'ui.setUnsavedChanges';
+      (priority ? urgent : normal).push({ method, args, resolve, reject });
+      pump();
+    });
   };
 }
 
@@ -639,12 +668,83 @@ function snippetFor(text, start, end) {
 
 /** Literal search in edited text; public offsets refer to the original UTF-16
  * string passed here. Nikud/cantillation are ignored, whitespace stays exact. */
-function findInBook(text, query, { limit = 200 } = {}) {
+function createBookSearch() {
+  let cachedText, normalizedText;
+  const search = (text, query, options = {}) => {
+    if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
+    if (text !== cachedText) { cachedText = text; normalizedText = normalize(text); }
+    return findInBook(text, query, { ...options, normalizedText });
+  };
+  search.clear = () => { cachedText = undefined; normalizedText = undefined; };
+  return search;
+}
+
+/** Large books normalize and search off the UI thread. The worker retains only
+ * the current book; subsequent queries transmit just the query. */
+function createAsyncBookSearch({ threshold = 250000, workerFactory } = {}) {
+  const fallback = createBookSearch(), pending = new Map();
+  let worker, sentText, sequence = 0, disabled = false;
+  function reset(useFallback = false) {
+    worker?.terminate(); worker = undefined; sentText = undefined;
+    for (const item of pending.values()) {
+      try { item.resolve(useFallback ? fallback(item.text, item.query, item.options) : []); }
+      catch (error) { item.reject(error); }
+    }
+    pending.clear();
+    fallback.clear();
+  }
+  function makeWorker() {
+    const source = `const hebrewMarks = ${hebrewMarks}; const markCode = ${markCode}; const normalize = ${normalize};
+      ${snippetFor} ${findInBook} ${createBookSearch}
+      const search = createBookSearch(); let text;
+      self.onmessage = ({data}) => {
+        try { if (typeof data.text === 'string') text = data.text;
+          self.postMessage({id: data.id, results: search(text, data.query, data.options)});
+        } catch (error) { self.postMessage({id: data.id, error: error.message}); }
+      };`;
+    if (workerFactory) return workerFactory(source);
+    const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+    try { return new Worker(url); } finally { URL.revokeObjectURL(url); }
+  }
+  const search = async (text, query, options = {}) => {
+    if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
+    if (text.length < threshold || disabled || (!workerFactory && typeof Worker === 'undefined')) {
+      if (worker) reset();
+      return fallback(text, query, options);
+    }
+    try {
+      if (!worker) {
+        worker = makeWorker();
+        worker.onmessage = ({ data }) => {
+          const item = pending.get(data.id);
+          if (!item) return;
+          pending.delete(data.id);
+          if (data.error) item.reject(new Error(data.error)); else item.resolve(data.results);
+        };
+        worker.onerror = event => { event?.preventDefault?.(); disabled = true; reset(true); };
+        worker.onmessageerror = worker.onerror;
+      }
+      return await new Promise((resolve, reject) => {
+        const id = ++sequence;
+        pending.set(id, { resolve, reject, text, query, options });
+        const message = { id, query, options: { limit: options.limit } };
+        if (text !== sentText) message.text = text;
+        try { worker.postMessage(message); sentText = text; }
+        catch { disabled = true; reset(true); }
+      });
+    } catch { disabled = true; reset(true); return fallback(text, query, options); }
+  };
+  search.clear = () => reset();
+  search.dispose = () => { disabled = true; reset(); };
+  return search;
+}
+
+function findInBook(text, query, { limit = 200, normalizedText } = {}) {
   if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
   if (!Number.isFinite(limit) || limit <= 0 || !query.trim()) return [];
   const needle = normalize(query);
   if (!needle.trim()) return [];
-  const haystack = normalize(text), matches = [];
+  const haystack = normalizedText ?? normalize(text), matches = [];
   const max = Math.floor(limit);
   for (let from = 0; matches.length < max;) {
     const at = haystack.indexOf(needle, from);
@@ -876,6 +976,134 @@ function filterLibraryTree(node) {
   };
 }
 
+// Immutable source books and copy-on-write drafts. The workspace index is the
+// commit point: a failed draft/index write never damages the previous snapshot.
+function textPatch(source, text) {
+  return diffBook(source, text).map(change => ({ start: change.start, end: change.end, text: change.proposed }));
+}
+function restorePatch(source, patch) {
+  if (Array.isArray(patch)) {
+    const parts = []; let cursor = 0;
+    for (const change of patch) {
+      if (!change || !Number.isInteger(change.start) || !Number.isInteger(change.end) ||
+          change.start < cursor || change.end < change.start || change.end > source.length || typeof change.text !== 'string') {
+        throw new Error('לא ניתן לשחזר את טיוטת הספר. נתוני הטיוטה נשמרו.');
+      }
+      parts.push(source.slice(cursor, change.start), change.text); cursor = change.end;
+    }
+    parts.push(source.slice(cursor)); return parts.join('');
+  }
+  if (!patch || !Number.isInteger(patch.start) || !Number.isInteger(patch.end) ||
+      patch.start < 0 || patch.end < patch.start || patch.end > source.length || typeof patch.text !== 'string') {
+    throw new Error('לא ניתן לשחזר את טיוטת הספר. נתוני הטיוטה נשמרו.');
+  }
+  return source.slice(0, patch.start) + patch.text + source.slice(patch.end);
+}
+function decodeStoredDraft(book, draft) {
+  const { editedPatch, reportedPatch, ...state } = draft;
+  const restoredBook = { ...book, sections: book.sections.map(section => ({ ...section,
+    text: book.originalText.slice(section.start, section.end) })) };
+  return { ...state, book: restoredBook, editedText: restorePatch(book.originalText, editedPatch),
+    ...(reportedPatch ? { reportedText: restorePatch(book.originalText, reportedPatch) } : {}) };
+}
+function createDraftStorage(call, idFactory) {
+  let committed = new Map();
+  const patches = new Map(), garbage = new Set();
+  function patchFor(id, kind, source, text) {
+    const key = `${id}:${kind}`, previous = patches.get(key);
+    if (previous?.source === source && previous.text === text) return previous.patch;
+    const patch = textPatch(source, text); patches.set(key, { source, text, patch }); return patch;
+  }
+  async function read() {
+    const index = await call('storage.get', { key: 'book-session' });
+    if (index?.schemaVersion !== 3) return index;
+    const sessions = [], restored = new Map();
+    for (const ref of index.sessions) {
+      const book = await call('storage.get', { key: ref.bookKey });
+      const draft = await call('storage.get', { key: ref.draftKey });
+      if (!book || !draft) throw new Error('לא ניתן לקרוא את טיוטת הספר. נתוני הטיוטה נשמרו.');
+      const item = decodeStoredDraft(book, draft);
+      sessions.push(item); restored.set(ref.id, { ...ref, serialized: JSON.stringify(draft), book: item.book });
+    }
+    committed = restored;
+    return { ...index, schemaVersion: 2, sessions };
+  }
+  async function write(snapshot) {
+    const next = new Map();
+    for (const item of snapshot?.sessions ?? []) {
+      const old = committed.get(item.id), { book, editedText, reportedText, ...state } = item;
+      const draft = { ...state, editedPatch: patchFor(item.id, 'edited', book.originalText, editedText),
+        ...(reportedText !== undefined ? { reportedPatch: patchFor(item.id, 'reported', book.originalText, reportedText) } : {}) };
+      const serialized = JSON.stringify(draft);
+      let bookKey = old?.bookKey;
+      if (!bookKey || old.book !== book) {
+        bookKey = `book-source:${idFactory()}`; garbage.add(bookKey);
+        await call('storage.set', { key: bookKey, value: { ...book,
+          sections: book.sections.map(({ text, ...section }) => section) } });
+      }
+      let draftKey = old?.draftKey;
+      if (!draftKey || old.serialized !== serialized) {
+        draftKey = `book-draft:${idFactory()}`; garbage.add(draftKey);
+        await call('storage.set', { key: draftKey, value: draft });
+      }
+      next.set(item.id, { id: item.id, bookKey, draftKey, serialized, book });
+    }
+    if (snapshot) await call('storage.set', { key: 'book-session', value: { ...snapshot, schemaVersion: 3,
+      sessions: [...next.values()].map(({ id, bookKey, draftKey }) => ({ id, bookKey, draftKey })) } });
+    else await call('storage.remove', { key: 'book-session' });
+    for (const ref of committed.values()) { garbage.add(ref.bookKey); garbage.add(ref.draftKey); }
+    committed = next;
+    for (const ref of next.values()) { garbage.delete(ref.bookKey); garbage.delete(ref.draftKey); }
+    for (const key of patches.keys()) if (!next.has(key.slice(0, key.lastIndexOf(':')))) patches.delete(key);
+    // Cleanup failure is harmless and retried on the next successful save.
+    for (const key of garbage) {
+      try { await call('storage.remove', { key }); garbage.delete(key); } catch { /* retain for retry */ }
+    }
+  }
+  return { read, write };
+}
+
+
+function createSourceGuard(call) {
+  const pending = new WeakMap();
+  let restores = Promise.resolve();
+  function changed() {
+    throw new Error('מקור הספר השתנה מאז תחילת העריכה. הטיוטה נשמרה, אך אי אפשר לשלוח אותה מול המקור המעודכן.');
+  }
+  function verifySource(book) {
+    const existing = pending.get(book);
+    if (existing) return existing;
+    const result = loadBook(call, book.identity).then(current => {
+      if (current.originalText !== book.originalText || current.sections.length !== book.sections.length ||
+          current.sections.some((section, index) => section.start !== book.sections[index].start || section.end !== book.sections[index].end)) {
+        changed();
+      }
+    });
+    pending.set(book, result);
+    result.finally(() => { if (pending.get(book) === result) pending.delete(book); }).catch(() => {});
+    return result;
+  }
+  async function check(book, sectionIndices = []) {
+    await verifySource(book);
+    // Full content comparisons do not prove internal DB section boundaries.
+    // Recheck authoritative maps for every section that a queued report uses.
+    for (const sectionIndex of new Set(sectionIndices)) {
+      if (!Number.isInteger(sectionIndex) || !book.sections[sectionIndex]) changed();
+      const map = await call('reader.getSectionTextMap', { ...book.identity, sectionIndex, layer: 'source' });
+      if (map?.sourceText !== book.sections[sectionIndex].text) changed();
+    }
+  }
+  // Restoration checks stay silent; submit always verifies again (or awaits a
+  // check already in flight) before sending even an existing report queue.
+  function restore(book) {
+    // Avoid holding fresh copies of all restored books in memory at once.
+    // Explicit submission checks can start immediately without joining this queue.
+    restores = restores.then(() => verifySource(book)).catch(() => {});
+    return restores;
+  }
+  return { check, restore };
+}
+
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, initialized, loading = false, sending = false, pause = false;
@@ -889,14 +1117,22 @@ let libraryPath = '/', libraryMode = 'grid', libraryQueryTimer;
 let writes = Promise.resolve(), saveTimer, revision = 0;
 let unsaved = false;
 let tocBook = null, tocTree = [], tocExpanded = new Set();
-let searchTimer;
+let searchTimer, searchGeneration = 0, searchSession = null;
 let visibleRange = { start: 0, end: 0 };
 let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
 let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
-let statusText = '', statusError = false;
+let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
-function message(text = '', error = false) { statusText = text; statusError = error; renderStatus(); }
+const draftStorage = createDraftStorage(call, newId), sourceGuard = createSourceGuard(call);
+const searchBook = createAsyncBookSearch();
+function message(text = '', error = false, duration = 0) {
+  clearTimeout(statusTimer);
+  statusText = text;
+  statusError = error;
+  renderStatus();
+  if (duration > 0) statusTimer = setTimeout(() => message(), duration);
+}
 function renderStatus() {
   const partial = !loading && !sending && !chooserOpen && hasPartialDelivery();
   const sent = partial ? session.queue.filter(item => item.sent).length : 0;
@@ -920,6 +1156,23 @@ function applyTheme(theme) {
 }
 function hasEdits() { return session && session.editedText !== (session.reportedText ?? session.book.originalText); }
 function hasPartialDelivery() { return !session?.completed && session?.queue?.some(item => item.sent) && session.queue.some(item => !item.sent); }
+function queuedSourceSections(item) {
+  if (!item.queue) return [];
+  if (item.queue.every(report => Array.isArray(report.sourceSections))) {
+    return [...new Set(item.queue.filter(report => !report.sent).flatMap(report => report.sourceSections))];
+  }
+  // Older queues did not retain their complete multi-section source ranges.
+  const changes = diffBook(item.book.originalText, item.editedText), indices = new Set();
+  for (const change of changes) {
+    let first = 0;
+    for (const section of item.book.sections) { if (section.start > change.start) break; first = section.index; }
+    indices.add(first);
+    for (const section of item.book.sections) {
+      if (section.index > first && section.start < change.end) indices.add(section.index);
+    }
+  }
+  return [...indices];
+}
 function controls() {
   const locked = loading || sending;
   el('proposed').setAttribute('aria-describedby', 'status');
@@ -938,6 +1191,7 @@ function controls() {
   renderStatus();
 }
 function render() {
+  if (searchSession !== session || chooserOpen) { searchBook.clear(); searchGeneration++; searchSession = session; }
   renderBookTabs();
   el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
   el('cancel-book-picker').hidden = true;
@@ -1188,18 +1442,22 @@ function switchNavigation(search) {
   el('nav-toc-tab').setAttribute('aria-selected', String(!search)); el('nav-search-tab').setAttribute('aria-selected', String(search));
   if (search) { renderSearchResults(); el('book-search').focus(); }
 }
-function renderSearchResults() {
+async function renderSearchResults() {
   if (!session) return;
+  const generation = ++searchGeneration, searchedSession = session, text = session.editedText;
   const query = el('book-search').value.trim();
   const group = document.createElement('div'); group.className = 'toc-group';
   if (!query) { const hint = document.createElement('p'); hint.textContent = 'כתבו מילים לחיפוש בספר'; group.append(hint); }
   else {
-    const results = findInBook(session.editedText, query);
+    const results = await searchBook(text, query);
+    if (generation !== searchGeneration || session !== searchedSession || session.editedText !== text ||
+        el('book-search').value.trim() !== query || chooserOpen || el('search-view').hidden) return;
     if (!results.length) { const hint = document.createElement('p'); hint.textContent = 'לא נמצאו תוצאות'; group.append(hint); }
     for (const result of results) {
       const row = document.createElement('div'); row.className = 'toc-row search-result';
       const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = projectNikud(result.snippet, session.hideNikud).text;
       label.addEventListener('click', () => {
+        if (session !== searchedSession || session.editedText !== text || el('book-search').value.trim() !== query) return;
         const originalOffset = originalToEditedOffset(session.editedText, session.book.originalText, result.offset);
         let section = session.book.sections[0];
         for (const candidate of session.book.sections) { if (candidate.start > originalOffset) break; section = candidate; }
@@ -1213,7 +1471,7 @@ function renderSearchResults() {
 }
 el('nav-toc-tab').addEventListener('click', () => switchNavigation(false));
 el('nav-search-tab').addEventListener('click', () => switchNavigation(true));
-el('book-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); });
+el('book-search').addEventListener('input', () => { searchGeneration++; clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); });
 el('toc-search').addEventListener('input', renderNavigation);
 el('toc-search-toggle').addEventListener('click', () => {
   el('toc-search-wrap').hidden = !el('toc-search-wrap').hidden;
@@ -1240,7 +1498,7 @@ async function persist(value = session, books = sessions) {
     libraryTabs: libraryTabs.map(item => ({ ...item, view: item.view ? { ...item.view, expanded: [...item.view.expanded] } : undefined })),
     sessions: nextBooks.map(item => ({ ...item, view: item.view ? { ...item.view, tocExpanded: [...item.view.tocExpanded] } : undefined,
       queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
-  writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
+  writes = writes.catch(() => {}).then(() => draftStorage.write(snapshot));
   await writes;
   // A background write must not restore tabs closed or switched since its snapshot.
   if (books === sessions && savedRevision === revision) sessions = nextBooks;
@@ -1310,6 +1568,7 @@ el('proposed').addEventListener('input', () => {
   }
   displayProjection = projectNikud(editedText, session.hideNikud);
   if (editedText === session.editedText) return;
+  searchGeneration++;
   if (session.completed) session.reportedText = session.editedText;
   // Unsent reports belong to the previous wording; rebuild them on next submit.
   // Until the user changes the text, retain their IDs for an idempotent retry.
@@ -1502,6 +1761,7 @@ el('editor').addEventListener('submit', async event => {
     if (!email) { message('יש לעדכן מייל לפני השליחה בהגדרות התוכנה.', true); return; }
     if (new TextEncoder().encode(session.editedText).length > MAX_BOOK_BYTES) throw new Error('הטקסט המתוקן גדול מדי (מעל 10 MB).');
     await persist();
+    await sourceGuard.check(session.book, queuedSourceSections(session));
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -1526,7 +1786,7 @@ el('editor').addEventListener('submit', async event => {
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
     if (session.completed) {
-      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`);
+      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`, false, 3000);
     }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
@@ -1535,7 +1795,7 @@ el('editor').addEventListener('submit', async event => {
 });
 async function initialize(boot) {
   applyTheme(boot?.theme);
-  const results = await Promise.allSettled([call('app.getTheme'), call('storage.get', { key: 'book-session' }),
+  const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
     call('settings.get', { key: 'key-library-view-mode' })]);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
@@ -1550,6 +1810,7 @@ async function initialize(boot) {
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
   for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
+  for (const item of sessions) sourceGuard.restore(item.book);
   if (!session) {
     message('טוען את הספרייה…');
     libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));

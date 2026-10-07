@@ -6,7 +6,9 @@ import { sendReport } from './report.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
-import { findInBook } from './book-search.js';
+import { createAsyncBookSearch } from './book-search.js';
+import { createDraftStorage } from './draft-storage.js';
+import { createSourceGuard } from './source-guard.js';
 import { editorRange, createContinuousEditor } from './editor-window.js';
 import { buildTocTree, flattenTocTree, activeTocKey, ensurePathExpanded, setAllExpanded } from './toc-tree.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
@@ -22,14 +24,22 @@ let libraryPath = '/', libraryMode = 'grid', libraryQueryTimer;
 let writes = Promise.resolve(), saveTimer, revision = 0;
 let unsaved = false;
 let tocBook = null, tocTree = [], tocExpanded = new Set();
-let searchTimer;
+let searchTimer, searchGeneration = 0, searchSession = null;
 let visibleRange = { start: 0, end: 0 };
 let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
 let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
-let statusText = '', statusError = false;
+let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
-function message(text = '', error = false) { statusText = text; statusError = error; renderStatus(); }
+const draftStorage = createDraftStorage(call, newId), sourceGuard = createSourceGuard(call);
+const searchBook = createAsyncBookSearch();
+function message(text = '', error = false, duration = 0) {
+  clearTimeout(statusTimer);
+  statusText = text;
+  statusError = error;
+  renderStatus();
+  if (duration > 0) statusTimer = setTimeout(() => message(), duration);
+}
 function renderStatus() {
   const partial = !loading && !sending && !chooserOpen && hasPartialDelivery();
   const sent = partial ? session.queue.filter(item => item.sent).length : 0;
@@ -53,6 +63,23 @@ function applyTheme(theme) {
 }
 function hasEdits() { return session && session.editedText !== (session.reportedText ?? session.book.originalText); }
 function hasPartialDelivery() { return !session?.completed && session?.queue?.some(item => item.sent) && session.queue.some(item => !item.sent); }
+function queuedSourceSections(item) {
+  if (!item.queue) return [];
+  if (item.queue.every(report => Array.isArray(report.sourceSections))) {
+    return [...new Set(item.queue.filter(report => !report.sent).flatMap(report => report.sourceSections))];
+  }
+  // Older queues did not retain their complete multi-section source ranges.
+  const changes = diffBook(item.book.originalText, item.editedText), indices = new Set();
+  for (const change of changes) {
+    let first = 0;
+    for (const section of item.book.sections) { if (section.start > change.start) break; first = section.index; }
+    indices.add(first);
+    for (const section of item.book.sections) {
+      if (section.index > first && section.start < change.end) indices.add(section.index);
+    }
+  }
+  return [...indices];
+}
 function controls() {
   const locked = loading || sending;
   el('proposed').setAttribute('aria-describedby', 'status');
@@ -71,6 +98,7 @@ function controls() {
   renderStatus();
 }
 function render() {
+  if (searchSession !== session || chooserOpen) { searchBook.clear(); searchGeneration++; searchSession = session; }
   renderBookTabs();
   el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
   el('cancel-book-picker').hidden = true;
@@ -321,18 +349,22 @@ function switchNavigation(search) {
   el('nav-toc-tab').setAttribute('aria-selected', String(!search)); el('nav-search-tab').setAttribute('aria-selected', String(search));
   if (search) { renderSearchResults(); el('book-search').focus(); }
 }
-function renderSearchResults() {
+async function renderSearchResults() {
   if (!session) return;
+  const generation = ++searchGeneration, searchedSession = session, text = session.editedText;
   const query = el('book-search').value.trim();
   const group = document.createElement('div'); group.className = 'toc-group';
   if (!query) { const hint = document.createElement('p'); hint.textContent = 'כתבו מילים לחיפוש בספר'; group.append(hint); }
   else {
-    const results = findInBook(session.editedText, query);
+    const results = await searchBook(text, query);
+    if (generation !== searchGeneration || session !== searchedSession || session.editedText !== text ||
+        el('book-search').value.trim() !== query || chooserOpen || el('search-view').hidden) return;
     if (!results.length) { const hint = document.createElement('p'); hint.textContent = 'לא נמצאו תוצאות'; group.append(hint); }
     for (const result of results) {
       const row = document.createElement('div'); row.className = 'toc-row search-result';
       const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = projectNikud(result.snippet, session.hideNikud).text;
       label.addEventListener('click', () => {
+        if (session !== searchedSession || session.editedText !== text || el('book-search').value.trim() !== query) return;
         const originalOffset = originalToEditedOffset(session.editedText, session.book.originalText, result.offset);
         let section = session.book.sections[0];
         for (const candidate of session.book.sections) { if (candidate.start > originalOffset) break; section = candidate; }
@@ -346,7 +378,7 @@ function renderSearchResults() {
 }
 el('nav-toc-tab').addEventListener('click', () => switchNavigation(false));
 el('nav-search-tab').addEventListener('click', () => switchNavigation(true));
-el('book-search').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); });
+el('book-search').addEventListener('input', () => { searchGeneration++; clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); });
 el('toc-search').addEventListener('input', renderNavigation);
 el('toc-search-toggle').addEventListener('click', () => {
   el('toc-search-wrap').hidden = !el('toc-search-wrap').hidden;
@@ -373,7 +405,7 @@ async function persist(value = session, books = sessions) {
     libraryTabs: libraryTabs.map(item => ({ ...item, view: item.view ? { ...item.view, expanded: [...item.view.expanded] } : undefined })),
     sessions: nextBooks.map(item => ({ ...item, view: item.view ? { ...item.view, tocExpanded: [...item.view.tocExpanded] } : undefined,
       queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
-  writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
+  writes = writes.catch(() => {}).then(() => draftStorage.write(snapshot));
   await writes;
   // A background write must not restore tabs closed or switched since its snapshot.
   if (books === sessions && savedRevision === revision) sessions = nextBooks;
@@ -443,6 +475,7 @@ el('proposed').addEventListener('input', () => {
   }
   displayProjection = projectNikud(editedText, session.hideNikud);
   if (editedText === session.editedText) return;
+  searchGeneration++;
   if (session.completed) session.reportedText = session.editedText;
   // Unsent reports belong to the previous wording; rebuild them on next submit.
   // Until the user changes the text, retain their IDs for an idempotent retry.
@@ -635,6 +668,7 @@ el('editor').addEventListener('submit', async event => {
     if (!email) { message('יש לעדכן מייל לפני השליחה בהגדרות התוכנה.', true); return; }
     if (new TextEncoder().encode(session.editedText).length > MAX_BOOK_BYTES) throw new Error('הטקסט המתוקן גדול מדי (מעל 10 MB).');
     await persist();
+    await sourceGuard.check(session.book, queuedSourceSections(session));
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -659,7 +693,7 @@ el('editor').addEventListener('submit', async event => {
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
     if (session.completed) {
-      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`);
+      message(`כל ${sent} הדיווחים נשלחו בהצלחה כהצעות תיקון לבדיקה ידנית.`, false, 3000);
     }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
@@ -668,7 +702,7 @@ el('editor').addEventListener('submit', async event => {
 });
 async function initialize(boot) {
   applyTheme(boot?.theme);
-  const results = await Promise.allSettled([call('app.getTheme'), call('storage.get', { key: 'book-session' }),
+  const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
     call('settings.get', { key: 'key-library-view-mode' })]);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
@@ -683,6 +717,7 @@ async function initialize(boot) {
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
   for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
+  for (const item of sessions) sourceGuard.restore(item.book);
   if (!session) {
     message('טוען את הספרייה…');
     libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));

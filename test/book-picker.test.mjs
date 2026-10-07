@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { storedWorkspace } from './stored-workspace.mjs';
 
 test('book tabs preserve independent drafts, reuse open books, and confirm closing unsent changes', async () => {
   class Element {
@@ -95,8 +96,8 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     assert.equal(el('proposed').value, content.ראשון);
     assert.equal(el('screen-title').textContent, titles.ראשון);
     assert.equal(el('book-tabs').children.length, 2);
-    const workspace = storage.get('book-session');
-    assert.equal(workspace.schemaVersion, 2);
+    const workspace = storedWorkspace(storage);
+    assert.equal(workspace.schemaVersion, 3);
     assert.equal(workspace.sessions.find(item => item.book.identity.bookId === 'שני').editedText, 'תיקון שטרם נשלח');
     const secondTab = () => el('book-tabs').children[0].children[0];
     await secondTab().fire('click');
