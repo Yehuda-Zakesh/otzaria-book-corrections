@@ -1,18 +1,22 @@
 import { loadBook, MAX_BOOK_BYTES } from './book.js';
-import { sendReport } from './report.js';
 import { diffBook } from './changes.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
 import { findInBook } from './book-search.js';
+import { editorRange, replaceEditorRange, createContinuousEditor } from './editor-window.js';
 import { buildTocTree, flattenTocTree, activeTocKey, ensurePathExpanded, setAllExpanded } from './toc-tree.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, pendingBook = null, initialized, loading = false, sending = false, pause = false;
 let chooserOpen = false;
 let writes = Promise.resolve(), saveTimer, revision = 0;
+let unsaved = false;
 let tocBook = null, tocTree = [], tocExpanded = new Set();
 let searchTimer;
+let visibleRange = { start: 0, end: 0 };
+let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
+let selectedRow = null, selectedKey = null;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
 function message(text = '', error = false) { el('status').textContent = text; el('status').classList.toggle('error', error); }
 function applyTheme(theme) {
@@ -29,10 +33,10 @@ function applyTheme(theme) {
   }
   document.documentElement.style.colorScheme = theme.mode;
 }
-function hasEdits() { return session && session.editedText !== session.book.originalText; }
+function hasEdits() { return session && session.editedText !== (session.reportedText ?? session.book.originalText); }
 function controls() {
   const locked = loading || sending;
-  el('proposed').readOnly = locked || !!session?.queue;
+  el('proposed').readOnly = locked || (!!session?.queue && !session.completed);
   el('send').hidden = !session || chooserOpen;
   el('change-book').hidden = !session || chooserOpen;
   el('change-book').disabled = locked;
@@ -52,7 +56,7 @@ function render() {
   el('location').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? '';
   el('screen-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תיקוני ספרים';
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
-  if (session) el('proposed').value = session.editedText;
+  if (session) showEditorRange(0);
   renderNavigation();
   el('next-book').textContent = session && !session.completed ? 'בטל את התיקונים ועבור לספר החדש' : 'עבור לספר החדש';
   controls();
@@ -68,12 +72,15 @@ function renderNavigation() {
     ensurePathExpanded(tocTree, activeTocKey(tocTree, session.location?.sectionIndex ?? 0), tocExpanded);
   }
   const active = activeTocKey(tocTree, session.location?.sectionIndex ?? 0);
+  selectedRow = null;
   const group = document.createElement('div'); group.className = 'toc-group';
   const scroll = el('toc-list').scrollTop;
   for (const item of flattenTocTree(tocTree, tocExpanded, query)) {
     const row = document.createElement('div');
     row.className = `toc-row${item.expanded ? ' expanded' : ''}${item.key === active ? ' selected' : ''}`;
-    row.style.setProperty('--level', Math.min(item.depth, 100));
+    row.dataset && (row.dataset.key = item.key);
+    if (item.key === active) selectedRow = row;
+    row.style.setProperty('--level', Math.min(100, Math.max(0, (item.entry.level ?? 1) - 1)));
     const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = item.entry.text; label.title = item.entry.text;
     label.addEventListener('click', () => navigateTo({ sectionIndex: item.entry.index, offset: 0 }));
     row.append(label);
@@ -87,6 +94,7 @@ function renderNavigation() {
     group.append(row);
   }
   el('toc-list').replaceChildren(group); el('toc-list').scrollTop = scroll;
+  selectedKey = active;
   el('section-number').max = String(session.book.sections.length);
   el('section-number').value = String((session.location?.sectionIndex ?? 0) + 1);
 }
@@ -102,15 +110,56 @@ function navigateTo(location) {
 function scrollEditorToOffset(offset, end = offset) {
   const editor = el('proposed');
   if (typeof editor.setSelectionRange !== 'function') return;
+  if (continuousEditor) { continuousEditor.scrollTo(offset, end); visibleRange = continuousEditor.range; return; }
+  if (offset < visibleRange.start || end > visibleRange.end) showEditorRange(offset);
+  offset -= visibleRange.start; end = Math.min(end - visibleRange.start, editor.value.length);
   editor.focus(); editor.setSelectionRange(offset, end);
   // Measure wrapped text with the editor's own font and width rather than
   // guessing a line height: a single source paragraph can wrap many times.
   const computed = getComputedStyle(editor), mirror = document.createElement('div');
   for (const key of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'padding', 'direction', 'tabSize']) mirror.style[key] = computed[key];
   Object.assign(mirror.style, { position: 'fixed', left: '-100000px', top: '0', width: `${editor.clientWidth}px`, whiteSpace: 'pre-wrap', overflowWrap: 'break-word', boxSizing: 'border-box' });
-  mirror.textContent = session.editedText.slice(0, offset);
+  mirror.textContent = editor.value.slice(0, offset);
   const marker = document.createElement('span'); marker.textContent = '\u200b'; mirror.append(marker); document.body.append(mirror);
   editor.scrollTop = Math.max(0, marker.offsetTop - editor.clientHeight / 4); mirror.remove();
+}
+function showEditorRange(offset) {
+  if (!continuousEditor && el('proposed').clientWidth > 0) {
+    continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
+  }
+  if (continuousEditor) {
+    continuousEditor.setText(session.editedText, offset); visibleRange = continuousEditor.range;
+  } else {
+    visibleRange = editorRange(session.editedText, offset);
+    el('proposed').value = session.editedText.slice(visibleRange.start, visibleRange.end);
+  }
+}
+function syncScrollNavigation(offset) {
+  if (!session || chooserOpen) return;
+  visibleRange = continuousEditor.range;
+  if (mappedText !== session.editedText || mappedBook !== session.book) {
+    mappedBook = session.book;
+    mappedText = session.editedText;
+    inverseChanges = diffBook(mappedText, session.book.originalText);
+  }
+  const originalOffset = originalToEditedOffset(mappedText, session.book.originalText, offset, inverseChanges);
+  const sections = session.book.sections;
+  let lo = 0, hi = sections.length - 1;
+  while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (sections[mid].start <= originalOffset) lo = mid; else hi = mid - 1; }
+  session.location = { sectionIndex: sections[lo].index, offset: Math.max(0, originalOffset - sections[lo].start) };
+  el('section-number').value = String(sections[lo].index + 1);
+  const key = activeTocKey(tocTree, sections[lo].index);
+  if (key === selectedKey) return;
+  ensurePathExpanded(tocTree, key, tocExpanded);
+  // Change the selected row only; rebuilding the whole tree on each scroll
+  // would replace focus and create avoidable layout work.
+  const nextRow = el('toc-list').querySelector?.(`[data-key="${key}"]`);
+  if (!nextRow) renderNavigation();
+  else {
+    selectedRow?.classList.remove('selected');
+    nextRow.classList.add('selected'); selectedRow = nextRow; selectedKey = key;
+  }
+  selectedRow?.scrollIntoView?.({ block: 'nearest' });
 }
 function switchNavigation(search) {
   el('toc-view').hidden = search; el('search-view').hidden = !search;
@@ -159,17 +208,22 @@ el('go-section').addEventListener('click', () => {
 });
 async function persist(value = session) {
   clearTimeout(saveTimer);
-  const snapshot = value ? JSON.parse(JSON.stringify(value)) : null, savedRevision = revision;
+  // Book data and report bodies are immutable; copy only mutable queue state.
+  const snapshot = value ? { ...value, queue: value.queue?.map(item => ({ ...item, payload: { ...item.payload }, request: item.request ? { ...item.request } : undefined })) ?? null } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
   await writes;
   if (savedRevision === revision) {
     el('draft-status').textContent = snapshot ? 'הטיוטה נשמרה' : '';
     await call('ui.setUnsavedChanges', { hasChanges: false }).catch(() => {});
+    if (savedRevision === revision) unsaved = false;
   }
 }
 function scheduleSave() {
   revision++; el('draft-status').textContent = 'שומר…';
-  call('ui.setUnsavedChanges', { hasChanges: true, message: 'השינויים האחרונים בספר טרם נשמרו בטיוטה.' }).catch(() => {});
+  if (!unsaved) {
+    unsaved = true;
+    call('ui.setUnsavedChanges', { hasChanges: true, message: 'השינויים האחרונים בספר טרם נשמרו בטיוטה.' }).catch(() => { unsaved = false; });
+  }
   clearTimeout(saveTimer); saveTimer = setTimeout(() => persist().catch(error => message(`שמירת הטיוטה נכשלה: ${error.message}`, true)), 400);
 }
 function identityFrom(event) {
@@ -204,8 +258,19 @@ function requestBook(event) {
   }).catch(error => message(error.message, true));
 }
 el('proposed').addEventListener('input', () => {
-  if (!session || loading || sending || session.queue) return;
-  session.editedText = el('proposed').value; controls(); scheduleSave();
+  if (!session || loading || sending || (session.queue && !session.completed)) return;
+  if (session.completed) {
+    session.reportedText = session.editedText;
+    session.queue = null;
+    session.completed = false;
+  }
+  if (continuousEditor) {
+    session.editedText = continuousEditor.edited(el('proposed').value); visibleRange = continuousEditor.range;
+  } else {
+    session.editedText = replaceEditorRange(session.editedText, visibleRange, el('proposed').value);
+    visibleRange.end = visibleRange.start + el('proposed').value.length;
+  }
+  controls(); scheduleSave();
   if (!el('search-view').hidden) { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); }
 });
 async function chooseOpenBook({ forceChoice = false } = {}) {
@@ -277,7 +342,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
-      const changes = diffBook(session.book.originalText, session.editedText);
+      const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
+      const changes = diffBook(session.book.originalText, session.editedText).filter(change => !reported.has(JSON.stringify(change)));
       if (!changes.length) { message('לא נמצאו שינויים בספר.'); return; }
       const queue = await prepareReports(session, changes, email, call, newId, (done, total) => message(`מכין דיווחים… ${done} מתוך ${total}`));
       session.queue = queue; await persist();
@@ -287,9 +353,12 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        await sendReport(host, item.payload);
+        if (!item.request) throw new Error('הטיוטה הישנה אינה מכילה מיקומי מקור לתיקון ישיר. יש לטעון מחדש את הספר.');
+        const result = await call('feedback.submitBookCorrection', { ...item.request, allowQueue: false });
+        if (result?.status !== 'sent') throw new Error(result?.message ?? 'התיקון לא נשלח. הטיוטה נשמרה.');
+        item.correctionSupported = result.correctionSupported === true;
       } catch (error) {
-        if (error.status === 409) { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
+        if (error.code === 'error.report_id_conflict') { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
         throw error;
       }
       item.sent = true; sent++; await persist();
@@ -297,6 +366,10 @@ el('editor').addEventListener('submit', async event => {
     }
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
+    if (session.completed) {
+      const direct = session.queue.filter(item => item.correctionSupported).length;
+      message(`כל ${sent} הדיווחים נשלחו בהצלחה. ${direct} תיקונים ישירים, ${sent - direct} הצעות בלבד.`);
+    }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
     message(`${error.message}${sent ? ` כבר נשלחו ${sent} דיווחים; ההמשך נשמר.` : ''}`, true);

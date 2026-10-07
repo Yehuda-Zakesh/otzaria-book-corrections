@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "org.otzaria.community.book-corrections",
   "name": "תיקוני ספרים",
-  "version": "0.3.1",
+  "version": "0.3.4",
   "stability": "experimental",
   "description": "עריכת עותק של ספר והפיכת השינויים לדיווחי שגיאות לאוצריא.",
   "author": "Yehuda-Zakesh",
@@ -11,7 +11,7 @@
   "minAppVersion": "0.9.98",
   "sdkVersion": "1.x",
   "permissions": [
-    "app.info.read", "app.user_email.read", "app.startup_contributions",
+    "app.info.read", "app.user_email.read", "app.startup_contributions", "feedback.send_email",
     "reader.open", "reader.context_menu", "reader.toolbar", "library.books.read", "library.content.read", "plugin.storage.read", "plugin.storage.write",
     "network.access", "events.subscribe:theme.changed"
   ],

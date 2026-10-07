@@ -8,10 +8,10 @@ import { Script } from 'node:vm';
 export async function build() {
   const root = new URL('../plugin/', import.meta.url);
   const sources = [];
-  for (const name of ['report.js', 'book.js', 'changes.js', 'book-reports.js', 'rpc.js', 'navigation.js', 'toc-tree.js', 'book-search.js', 'app.js']) {
+  for (const name of ['report.js', 'book.js', 'changes.js', 'book-reports.js', 'rpc.js', 'navigation.js', 'toc-tree.js', 'book-search.js', 'editor-window.js', 'app.js']) {
     const source = (await readFile(new URL(name, root), 'utf8'))
       .replace(/^export (?=(?:async )?function\s|const\s)/gm, '')
-      .replace(/^import \{[^\n]+\} from '\.\/(?:report|book|changes|book-reports|rpc|navigation|toc-tree|book-search)\.js';\r?\n/gm, '');
+      .replace(/^import \{[^\n]+\} from '\.\/(?:report|book|changes|book-reports|rpc|navigation|toc-tree|book-search|editor-window)\.js';\r?\n/gm, '');
     if (/^\s*(?:import|export)\b/m.test(source) || /\bimport\s*\(/.test(source)) {
       throw new Error(`Unsupported module syntax in ${name}`);
     }

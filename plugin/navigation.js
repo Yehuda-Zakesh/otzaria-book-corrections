@@ -11,10 +11,10 @@ function safeBoundary(text, offset) {
 /** Map a source caret into the edited book. Insertions at the caret use right
  * affinity: the caret follows inserted text and remains next to its source.
  * Deleted/replaced positions clamp to the available replacement text. */
-export function originalToEditedOffset(original, edited, offset) {
+export function originalToEditedOffset(original, edited, offset, changes = diffBook(original, edited)) {
   const sourceOffset = safeBoundary(original, clampOffset(offset, original.length));
   let shift = 0;
-  for (const change of diffBook(original, edited)) {
+  for (const change of changes) {
     if (sourceOffset < change.start) break;
     if (sourceOffset < change.end) {
       return safeBoundary(edited, change.start + shift + Math.min(sourceOffset - change.start, change.proposed.length));

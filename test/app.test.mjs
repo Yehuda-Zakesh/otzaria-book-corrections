@@ -27,13 +27,13 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
       _booted: true,
       on(event, handler) { events.set(event, handler); },
       call(method, args = {}) {
-        if (method === 'network.fetchStream') return (async function* () {
+        if (method === 'feedback.submitBookCorrection') return (async () => {
           let release;
           const response = new Promise(resolve => { release = resolve; });
           requests.push({ args: structuredClone(args), release });
           const status = await response;
-          yield { type: 'response', status };
-          yield { type: 'data', body: '{"success":true}' };
+          return status === 200 ? { success: true, data: { status: 'sent', correctionSupported: args.sectionIndex === 0 } }
+            : { success: false, error: { code: status === 409 ? 'error.report_id_conflict' : 'error.report_failed', message: 'שליחה נכשלה' } };
         })();
         let data = null;
         if (method === 'storage.get') data = storage.get(args.key) ?? null;
@@ -64,7 +64,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     await import('../plugin/app.js?fullbook-first'); await settle();
     assert.equal(emailReads, 0, 'email is read from settings only when submitting');
     events.get('contextMenu.itemClicked')({ itemId: 'correct-book', selection: { bookId: 'ספר', id: 1 } });
-    await settle();
+    for (let i = 0; i < 2000 && el('proposed').value !== raw; i++) await new Promise(resolve => setTimeout(resolve, 1));
     assert.equal(el('proposed').value, raw);
     assert.equal(el('send').disabled, true);
     el('proposed').value = 'אם\nגה'; el('proposed').fire('input');
@@ -83,18 +83,17 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(storage.get('book-session').queue.length, 2);
     requests[0].release(200); await waitForRequests(2);
     assert.equal(storage.get('book-session').queue[0].sent, true);
-    const firstPayload = JSON.parse(requests[0].args.body), secondPayload = JSON.parse(requests[1].args.body);
-    assert.equal(firstPayload.line_number, 1);
-    assert.equal(secondPayload.line_number, 2);
-    assert.equal(firstPayload.source_folder, 'otzaria-books');
-    assert.equal(secondPayload.source_folder, 'otzaria-books');
-    assert.equal(firstPayload.file_path, 'ספרים/ספר.txt');
-    assert.equal(firstPayload.sender_email, 'user@example.com');
-    assert.equal(firstPayload.context_text, 'אב');
-    assert.equal(secondPayload.context_text, 'גד');
-    assert.equal(requests[0].args.method, 'POST');
-    assert.equal(requests[0].args.url, 'https://otzaria.org/api/reportingerrors');
-    assert.equal(firstPayload.schema_version, undefined, 'uses the existing free-text reporting contract');
+    const firstPayload = requests[0].args, secondPayload = requests[1].args;
+    assert.equal(firstPayload.sectionIndex, 0);
+    assert.equal(secondPayload.sectionIndex, 1);
+    assert.equal(firstPayload.bookId, 'ספר');
+    assert.equal(firstPayload.sourceStart, 1);
+    assert.equal(firstPayload.sourceEnd, 2);
+    assert.equal(firstPayload.original, 'ב');
+    assert.equal(firstPayload.proposed, 'ם');
+    assert.equal(firstPayload.forceFreeText, false);
+    assert.equal(firstPayload.allowQueue, false);
+    assert.deepEqual(firstPayload.snapshots, [{ index: 0, text: 'אב' }]);
     requests[1].release(503); await submission;
     const partial = storage.get('book-session');
     assert.deepEqual(partial.queue.map(item => item.sent), [true, false]);
@@ -114,16 +113,33 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(el('proposed').readOnly, true);
     assert.equal(el('send').textContent, 'המשך שליחה');
     const retry = el('editor').fire('submit'); await waitForRequests(3);
-    assert.equal(requests[1].args.body, requests[2].args.body, 'direct retry keeps report ID and complete immutable body');
-    assert.equal(JSON.parse(requests[2].args.body).report_id, secondPayload.report_id);
-    assert.equal(JSON.parse(requests[2].args.body).sender_email, 'user@example.com', 'settings changes cannot mutate an already attempted report');
+    assert.deepEqual(requests[1].args, requests[2].args, 'native retry keeps report ID and source snapshots');
+    assert.equal(requests[2].args.reportId, secondPayload.reportId);
     assert.equal(emailReads, 3, 'each submit reads current settings without adding an email dialog');
     await el('editor').fire('submit'); assert.equal(requests.length, 3);
     requests[2].release(200); await retry;
     assert.equal(storage.get('book-session').completed, true);
     assert.deepEqual(storage.get('book-session').queue.map(item => item.sent), [true, true]);
     assert.match(el('status').textContent, /כל 2 הדיווחים נשלחו/);
+    assert.match(el('status').textContent, /1 תיקונים ישירים, 1 הצעות בלבד/);
     assert.equal(el('send').disabled, true);
+    assert.equal(el('proposed').readOnly, false, 'successful delivery allows another correction');
+    el('proposed').value = 'אם\nגה\nחדש'; el('proposed').fire('input');
+    assert.equal(el('send').disabled, false);
+    const additional = el('editor').fire('submit'); await waitForRequests(4);
+    assert.equal(storage.get('book-session').queue.length, 1, 'previously reported corrections are excluded');
+    const additionalPayload = requests[3].args;
+    assert.notEqual(additionalPayload.reportId, secondPayload.reportId);
+    requests[3].release(409); await additional;
+    assert.notEqual(storage.get('book-session').queue[0].request.reportId, additionalPayload.reportId);
+    const conflictRetry = el('editor').fire('submit'); await waitForRequests(5);
+    assert.notEqual(requests[4].args.reportId, additionalPayload.reportId);
+    assert.equal(requests[4].args.original, additionalPayload.original);
+    requests[4].release(200); await conflictRetry;
+    setup();
+    await import('../plugin/app.js?fullbook-completed-reload'); await settle();
+    assert.equal(el('proposed').readOnly, false, 'completed drafts remain editable after reload');
+    assert.equal(el('proposed').value, 'אם\nגה\nחדש');
     await el('discard').fire('click');
     assert.equal(el('editor').hidden, false, 'failed deletion preserves completed session');
     failRemove = false; await el('discard').fire('click');

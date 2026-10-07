@@ -426,10 +426,10 @@ function safeBoundary(text, offset) {
 /** Map a source caret into the edited book. Insertions at the caret use right
  * affinity: the caret follows inserted text and remains next to its source.
  * Deleted/replaced positions clamp to the available replacement text. */
-function originalToEditedOffset(original, edited, offset) {
+function originalToEditedOffset(original, edited, offset, changes = diffBook(original, edited)) {
   const sourceOffset = safeBoundary(original, clampOffset(offset, original.length));
   let shift = 0;
-  for (const change of diffBook(original, edited)) {
+  for (const change of changes) {
     if (sourceOffset < change.start) break;
     if (sourceOffset < change.end) {
       return safeBoundary(edited, change.start + shift + Math.min(sourceOffset - change.start, change.proposed.length));
@@ -607,13 +607,177 @@ function findInBook(text, query, { limit = 200 } = {}) {
   });
 }
 
+const EDITOR_CHUNK = 16000;
+
+// Bound native textarea layout, including books with a single huge paragraph.
+function editorRange(text, offset = 0, exactStart = false) {
+  offset = Math.max(0, Math.min(text.length, offset));
+  let start = exactStart ? offset : Math.floor(Math.min(offset, Math.max(0, text.length - 1)) / EDITOR_CHUNK) * EDITOR_CHUNK;
+  if (start && /[\uDC00-\uDFFF]/.test(text[start])) start++;
+  let end = Math.min(text.length, start + EDITOR_CHUNK);
+  if (end < text.length && /[\uDC00-\uDFFF]/.test(text[end])) end++;
+  return { start, end };
+}
+
+function replaceEditorRange(text, range, value) {
+  return text.slice(0, range.start) + value + text.slice(range.end);
+}
+
+function editorSegments(text) {
+  const segments = [];
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(text.length, start + EDITOR_CHUNK);
+    if (end < text.length) {
+      const newline = text.lastIndexOf('\n', end - 1);
+      if (newline >= start + EDITOR_CHUNK / 2) end = newline + 1;
+      else if (/[\uDC00-\uDFFF]/.test(text[end])) end++;
+    }
+    segments.push({ start, end }); start = end;
+  }
+  return segments.length ? segments : [{ start: 0, end: 0 }];
+}
+
+// One scrollbar belongs to the whole book. Only nearby text is laid out in
+// the native editor; replacing that window never restarts the scroll position.
+function createContinuousEditor(viewport, canvas, editor, onPosition) {
+  let text = '', segments = [], heights = [], tops = [], range = { start: 0, end: 0 };
+  let first = 0, last = 0, markers = [], frame = null, programmaticTop = null;
+  let width = 0, lineHeight = 38, padding = 24;
+  const mirror = document.createElement('div');
+  Object.assign(mirror.style, { position: 'fixed', left: '-100000px', top: '0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', visibility: 'hidden' });
+  function configure() {
+    const style = getComputedStyle(editor);
+    for (const key of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'direction', 'tabSize']) mirror.style[key] = style[key];
+    width = editor.clientWidth;
+    mirror.style.width = `${width}px`;
+    lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.5;
+    padding = parseFloat(getComputedStyle(canvas).getPropertyValue('--book-padding')) || 24;
+  }
+  function rebuildTops() {
+    tops = [0];
+    for (const height of heights) tops.push(tops.at(-1) + height);
+    canvas.style.height = `${Math.max(viewport.clientHeight, tops.at(-1) + padding * 2)}px`;
+  }
+  function indexAtHeight(y) {
+    let lo = 0, hi = segments.length - 1;
+    while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (tops[mid] <= y) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function indexAtOffset(offset) {
+    let lo = 0, hi = segments.length - 1;
+    while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (segments[mid].start <= offset) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function mount(index, force = false) {
+    const nextFirst = Math.max(0, index - 1), nextLast = Math.min(segments.length - 1, index + 1);
+    if (!force && first === nextFirst && last === nextLast && editor.value === text.slice(range.start, range.end)) return;
+    const anchorY = viewport.scrollTop - tops[index];
+    first = nextFirst; last = nextLast;
+    range = { start: segments[first].start, end: segments[last].end };
+    document.body.append(mirror);
+    for (let i = first; i <= last; i++) {
+      let value = text.slice(segments[i].start, segments[i].end);
+      if (i < segments.length - 1 && value.endsWith('\n')) value = value.slice(0, -1);
+      mirror.textContent = value + '\u200b';
+      heights[i] = Math.max(lineHeight, mirror.getBoundingClientRect().height);
+    }
+    rebuildTops();
+    const value = text.slice(range.start, range.end);
+    editor.value = value;
+    // Mark source boundaries once per mounted window, not on every wheel tick.
+    mirror.replaceChildren(); markers = [];
+    let cursor = 0;
+    while (cursor < value.length) {
+      const span = document.createElement('span');
+      const newline = value.indexOf('\n', cursor);
+      let end = newline >= 0 && newline - cursor < 256 ? newline + 1 : Math.min(value.length, cursor + 256);
+      if (end < value.length && /[\uDC00-\uDFFF]/.test(value[end])) end++;
+      span.textContent = value.slice(cursor, end);
+      mirror.append(span); markers.push({ offset: range.start + cursor, span }); cursor = end;
+    }
+    const tail = document.createElement('span'); tail.textContent = '\u200b'; mirror.append(tail);
+    const height = Math.max(lineHeight, mirror.getBoundingClientRect().height);
+    markers = markers.map(marker => ({ offset: marker.offset, y: marker.span.offsetTop }));
+    editor.style.top = `${padding + tops[first]}px`;
+    editor.style.height = `${height}px`;
+    editor.scrollTop = 0;
+    mirror.remove();
+    viewport.scrollTop = Math.max(0, tops[index] + anchorY);
+  }
+  function setText(value, offset = 0) {
+    const previousText = text, previousWidth = width, previousLineHeight = lineHeight;
+    const previous = new Map(segments.map((segment, i) => [segment.start, { ...segment, height: heights[i] }]));
+    text = value; segments = editorSegments(text); configure();
+    const charsPerLine = Math.max(1, Math.floor(width / (parseFloat(getComputedStyle(editor).fontSize) * 0.55)));
+    heights = segments.map(segment => {
+      const before = previous.get(segment.start);
+      if (before && before.end === segment.end && previousWidth === width && previousLineHeight === lineHeight
+        && previousText.slice(before.start, before.end) === text.slice(segment.start, segment.end)) return before.height;
+      const lines = text.slice(segment.start, segment.end).replace(/\n$/, '').split('\n');
+      return lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / charsPerLine)), 0) * lineHeight;
+    });
+    rebuildTops(); mount(indexAtOffset(offset), true);
+  }
+  function visibleOffset() {
+    const y = Math.max(0, viewport.scrollTop - padding - tops[first]);
+    let lo = 0, hi = Math.max(0, markers.length - 1);
+    while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (markers[mid].y <= y) lo = mid; else hi = mid - 1; }
+    return markers[lo]?.offset ?? range.start;
+  }
+  function scrollTo(offset, end = offset) {
+    mount(indexAtOffset(offset));
+    editor.focus({ preventScroll: true });
+    editor.setSelectionRange(offset - range.start, Math.min(end, range.end) - range.start);
+    document.body.append(mirror);
+    mirror.textContent = text.slice(range.start, offset);
+    const caret = document.createElement('span'); caret.textContent = '\u200b'; mirror.append(caret);
+    viewport.scrollTop = Math.max(0, padding + tops[first] + caret.offsetTop - viewport.clientHeight / 4);
+    mirror.remove(); programmaticTop = viewport.scrollTop;
+  }
+  viewport.addEventListener('scroll', () => {
+    if (frame !== null) return;
+    frame = requestAnimationFrame(() => {
+      frame = null;
+      if (programmaticTop !== null && Math.abs(viewport.scrollTop - programmaticTop) < 1) { programmaticTop = null; return; }
+      programmaticTop = null;
+      const y = viewport.scrollTop - padding;
+      const index = indexAtHeight(Math.max(0, y));
+      mount(index);
+      onPosition(visibleOffset());
+    });
+  }, { passive: true });
+  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => {
+    if (editor.clientWidth === width || !segments.length) return;
+    const offset = visibleOffset(); setText(text, offset); scrollTo(offset);
+  }).observe(viewport);
+  viewport.addEventListener('click', event => {
+    if (event.target === viewport || event.target === canvas) editor.focus({ preventScroll: true });
+  });
+  return {
+    setText, scrollTo, visibleOffset,
+    get range() { return range; },
+    edited(value) {
+      const offset = range.start + editor.selectionStart;
+      const nextText = replaceEditorRange(text, range, value);
+      const start = range.start + editor.selectionStart, end = range.start + editor.selectionEnd;
+      setText(nextText, offset);
+      editor.setSelectionRange(Math.max(0, Math.min(start - range.start, editor.value.length)), Math.max(0, Math.min(end - range.start, editor.value.length)));
+      return text;
+    }
+  };
+}
+
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, pendingBook = null, initialized, loading = false, sending = false, pause = false;
 let chooserOpen = false;
 let writes = Promise.resolve(), saveTimer, revision = 0;
+let unsaved = false;
 let tocBook = null, tocTree = [], tocExpanded = new Set();
 let searchTimer;
+let visibleRange = { start: 0, end: 0 };
+let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
+let selectedRow = null, selectedKey = null;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
 function message(text = '', error = false) { el('status').textContent = text; el('status').classList.toggle('error', error); }
 function applyTheme(theme) {
@@ -630,10 +794,10 @@ function applyTheme(theme) {
   }
   document.documentElement.style.colorScheme = theme.mode;
 }
-function hasEdits() { return session && session.editedText !== session.book.originalText; }
+function hasEdits() { return session && session.editedText !== (session.reportedText ?? session.book.originalText); }
 function controls() {
   const locked = loading || sending;
-  el('proposed').readOnly = locked || !!session?.queue;
+  el('proposed').readOnly = locked || (!!session?.queue && !session.completed);
   el('send').hidden = !session || chooserOpen;
   el('change-book').hidden = !session || chooserOpen;
   el('change-book').disabled = locked;
@@ -653,7 +817,7 @@ function render() {
   el('location').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? '';
   el('screen-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תיקוני ספרים';
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
-  if (session) el('proposed').value = session.editedText;
+  if (session) showEditorRange(0);
   renderNavigation();
   el('next-book').textContent = session && !session.completed ? 'בטל את התיקונים ועבור לספר החדש' : 'עבור לספר החדש';
   controls();
@@ -669,12 +833,15 @@ function renderNavigation() {
     ensurePathExpanded(tocTree, activeTocKey(tocTree, session.location?.sectionIndex ?? 0), tocExpanded);
   }
   const active = activeTocKey(tocTree, session.location?.sectionIndex ?? 0);
+  selectedRow = null;
   const group = document.createElement('div'); group.className = 'toc-group';
   const scroll = el('toc-list').scrollTop;
   for (const item of flattenTocTree(tocTree, tocExpanded, query)) {
     const row = document.createElement('div');
     row.className = `toc-row${item.expanded ? ' expanded' : ''}${item.key === active ? ' selected' : ''}`;
-    row.style.setProperty('--level', Math.min(item.depth, 100));
+    row.dataset && (row.dataset.key = item.key);
+    if (item.key === active) selectedRow = row;
+    row.style.setProperty('--level', Math.min(100, Math.max(0, (item.entry.level ?? 1) - 1)));
     const label = document.createElement('button'); label.type = 'button'; label.className = 'toc-label'; label.textContent = item.entry.text; label.title = item.entry.text;
     label.addEventListener('click', () => navigateTo({ sectionIndex: item.entry.index, offset: 0 }));
     row.append(label);
@@ -688,6 +855,7 @@ function renderNavigation() {
     group.append(row);
   }
   el('toc-list').replaceChildren(group); el('toc-list').scrollTop = scroll;
+  selectedKey = active;
   el('section-number').max = String(session.book.sections.length);
   el('section-number').value = String((session.location?.sectionIndex ?? 0) + 1);
 }
@@ -703,15 +871,56 @@ function navigateTo(location) {
 function scrollEditorToOffset(offset, end = offset) {
   const editor = el('proposed');
   if (typeof editor.setSelectionRange !== 'function') return;
+  if (continuousEditor) { continuousEditor.scrollTo(offset, end); visibleRange = continuousEditor.range; return; }
+  if (offset < visibleRange.start || end > visibleRange.end) showEditorRange(offset);
+  offset -= visibleRange.start; end = Math.min(end - visibleRange.start, editor.value.length);
   editor.focus(); editor.setSelectionRange(offset, end);
   // Measure wrapped text with the editor's own font and width rather than
   // guessing a line height: a single source paragraph can wrap many times.
   const computed = getComputedStyle(editor), mirror = document.createElement('div');
   for (const key of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'padding', 'direction', 'tabSize']) mirror.style[key] = computed[key];
   Object.assign(mirror.style, { position: 'fixed', left: '-100000px', top: '0', width: `${editor.clientWidth}px`, whiteSpace: 'pre-wrap', overflowWrap: 'break-word', boxSizing: 'border-box' });
-  mirror.textContent = session.editedText.slice(0, offset);
+  mirror.textContent = editor.value.slice(0, offset);
   const marker = document.createElement('span'); marker.textContent = '\u200b'; mirror.append(marker); document.body.append(mirror);
   editor.scrollTop = Math.max(0, marker.offsetTop - editor.clientHeight / 4); mirror.remove();
+}
+function showEditorRange(offset) {
+  if (!continuousEditor && el('proposed').clientWidth > 0) {
+    continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
+  }
+  if (continuousEditor) {
+    continuousEditor.setText(session.editedText, offset); visibleRange = continuousEditor.range;
+  } else {
+    visibleRange = editorRange(session.editedText, offset);
+    el('proposed').value = session.editedText.slice(visibleRange.start, visibleRange.end);
+  }
+}
+function syncScrollNavigation(offset) {
+  if (!session || chooserOpen) return;
+  visibleRange = continuousEditor.range;
+  if (mappedText !== session.editedText || mappedBook !== session.book) {
+    mappedBook = session.book;
+    mappedText = session.editedText;
+    inverseChanges = diffBook(mappedText, session.book.originalText);
+  }
+  const originalOffset = originalToEditedOffset(mappedText, session.book.originalText, offset, inverseChanges);
+  const sections = session.book.sections;
+  let lo = 0, hi = sections.length - 1;
+  while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (sections[mid].start <= originalOffset) lo = mid; else hi = mid - 1; }
+  session.location = { sectionIndex: sections[lo].index, offset: Math.max(0, originalOffset - sections[lo].start) };
+  el('section-number').value = String(sections[lo].index + 1);
+  const key = activeTocKey(tocTree, sections[lo].index);
+  if (key === selectedKey) return;
+  ensurePathExpanded(tocTree, key, tocExpanded);
+  // Change the selected row only; rebuilding the whole tree on each scroll
+  // would replace focus and create avoidable layout work.
+  const nextRow = el('toc-list').querySelector?.(`[data-key="${key}"]`);
+  if (!nextRow) renderNavigation();
+  else {
+    selectedRow?.classList.remove('selected');
+    nextRow.classList.add('selected'); selectedRow = nextRow; selectedKey = key;
+  }
+  selectedRow?.scrollIntoView?.({ block: 'nearest' });
 }
 function switchNavigation(search) {
   el('toc-view').hidden = search; el('search-view').hidden = !search;
@@ -760,17 +969,22 @@ el('go-section').addEventListener('click', () => {
 });
 async function persist(value = session) {
   clearTimeout(saveTimer);
-  const snapshot = value ? JSON.parse(JSON.stringify(value)) : null, savedRevision = revision;
+  // Book data and report bodies are immutable; copy only mutable queue state.
+  const snapshot = value ? { ...value, queue: value.queue?.map(item => ({ ...item, payload: { ...item.payload }, request: item.request ? { ...item.request } : undefined })) ?? null } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => snapshot ? call('storage.set', { key: 'book-session', value: snapshot }) : call('storage.remove', { key: 'book-session' }));
   await writes;
   if (savedRevision === revision) {
     el('draft-status').textContent = snapshot ? 'הטיוטה נשמרה' : '';
     await call('ui.setUnsavedChanges', { hasChanges: false }).catch(() => {});
+    if (savedRevision === revision) unsaved = false;
   }
 }
 function scheduleSave() {
   revision++; el('draft-status').textContent = 'שומר…';
-  call('ui.setUnsavedChanges', { hasChanges: true, message: 'השינויים האחרונים בספר טרם נשמרו בטיוטה.' }).catch(() => {});
+  if (!unsaved) {
+    unsaved = true;
+    call('ui.setUnsavedChanges', { hasChanges: true, message: 'השינויים האחרונים בספר טרם נשמרו בטיוטה.' }).catch(() => { unsaved = false; });
+  }
   clearTimeout(saveTimer); saveTimer = setTimeout(() => persist().catch(error => message(`שמירת הטיוטה נכשלה: ${error.message}`, true)), 400);
 }
 function identityFrom(event) {
@@ -805,8 +1019,19 @@ function requestBook(event) {
   }).catch(error => message(error.message, true));
 }
 el('proposed').addEventListener('input', () => {
-  if (!session || loading || sending || session.queue) return;
-  session.editedText = el('proposed').value; controls(); scheduleSave();
+  if (!session || loading || sending || (session.queue && !session.completed)) return;
+  if (session.completed) {
+    session.reportedText = session.editedText;
+    session.queue = null;
+    session.completed = false;
+  }
+  if (continuousEditor) {
+    session.editedText = continuousEditor.edited(el('proposed').value); visibleRange = continuousEditor.range;
+  } else {
+    session.editedText = replaceEditorRange(session.editedText, visibleRange, el('proposed').value);
+    visibleRange.end = visibleRange.start + el('proposed').value.length;
+  }
+  controls(); scheduleSave();
   if (!el('search-view').hidden) { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearchResults, 150); }
 });
 async function chooseOpenBook({ forceChoice = false } = {}) {
@@ -878,7 +1103,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
-      const changes = diffBook(session.book.originalText, session.editedText);
+      const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
+      const changes = diffBook(session.book.originalText, session.editedText).filter(change => !reported.has(JSON.stringify(change)));
       if (!changes.length) { message('לא נמצאו שינויים בספר.'); return; }
       const queue = await prepareReports(session, changes, email, call, newId, (done, total) => message(`מכין דיווחים… ${done} מתוך ${total}`));
       session.queue = queue; await persist();
@@ -888,9 +1114,12 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        await sendReport(host, item.payload);
+        if (!item.request) throw new Error('הטיוטה הישנה אינה מכילה מיקומי מקור לתיקון ישיר. יש לטעון מחדש את הספר.');
+        const result = await call('feedback.submitBookCorrection', { ...item.request, allowQueue: false });
+        if (result?.status !== 'sent') throw new Error(result?.message ?? 'התיקון לא נשלח. הטיוטה נשמרה.');
+        item.correctionSupported = result.correctionSupported === true;
       } catch (error) {
-        if (error.status === 409) { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
+        if (error.code === 'error.report_id_conflict') { item.payload.report_id = newId(); if (item.request) item.request.reportId = item.payload.report_id; await persist(); }
         throw error;
       }
       item.sent = true; sent++; await persist();
@@ -898,6 +1127,10 @@ el('editor').addEventListener('submit', async event => {
     }
     session.completed = session.queue.every(item => item.sent); await persist();
     message(session.completed ? `כל ${sent} הדיווחים נשלחו בהצלחה.` : `נשלחו ${sent} מתוך ${session.queue.length}. אפשר להמשיך את השליחה בהמשך.`);
+    if (session.completed) {
+      const direct = session.queue.filter(item => item.correctionSupported).length;
+      message(`כל ${sent} הדיווחים נשלחו בהצלחה. ${direct} תיקונים ישירים, ${sent - direct} הצעות בלבד.`);
+    }
   } catch (error) {
     const sent = session?.queue?.filter(item => item.sent).length ?? 0;
     message(`${error.message}${sent ? ` כבר נשלחו ${sent} דיווחים; ההמשך נשמר.` : ''}`, true);
