@@ -14,7 +14,7 @@ test('installed entrypoint runs a classic bundle and initializes after delayed S
   function el(id) {
     if (!elements.has(id)) elements.set(id, {
       value: '', textContent: id === 'status' ? 'טוען…' : '', hidden: true,
-      classList: { toggle() {} }, addEventListener() {}, focus() {}, replaceChildren() {}
+      classList: { toggle() {} }, addEventListener() {}, focus() {}, replaceChildren() {}, setAttribute() {}
     });
     return elements.get(id);
   }
