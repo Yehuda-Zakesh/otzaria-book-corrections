@@ -96,6 +96,8 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(partial.editedText, 'אם\nגה');
     assert.match(el('status').textContent, /כבר נשלחו 1/);
     assert.equal(el('proposed').readOnly, true, 'prepared reports keep the editor immutable');
+    assert.match(el('status').textContent, /העריכה נעולה זמנית כי 1 מתוך 2 דיווחים כבר נשלחו/);
+    assert.match(el('status').textContent, /חיבור לרשת.*המשך שליחה.*העריכה תיפתח/);
     assert.equal(el('send').disabled, false);
     failRemove = true; await el('discard').fire('click');
     assert.equal(el('editor').hidden, false);
@@ -108,6 +110,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(el('proposed').value, 'אם\nגה');
     assert.equal(el('proposed').readOnly, true);
     assert.equal(el('send').textContent, 'המשך שליחה');
+    assert.match(el('status').textContent, /העריכה נעולה זמנית/,'restored locked editor explains the reason and recovery');
     const retry = el('editor').fire('submit'); await waitForRequests(3);
     assert.deepEqual(requests[1].args, requests[2].args, 'legacy retry keeps the complete report payload');
     assert.equal(requests[2].args.report_id, secondPayload.report_id);
@@ -118,6 +121,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.deepEqual(savedSession().queue.map(item => item.sent), [true, true]);
     assert.match(el('status').textContent, /כל 2 הדיווחים נשלחו/);
     assert.match(el('status').textContent, /כהצעות תיקון לבדיקה ידנית/);
+    assert.doesNotMatch(el('status').textContent, /העריכה נעולה/,'completion clears the lock explanation');
     assert.equal(el('send').disabled, true);
     assert.equal(el('proposed').readOnly, false, 'successful delivery allows another correction');
     el('proposed').value = 'אם\nגה\nחדש'; el('proposed').fire('input');

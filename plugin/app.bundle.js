@@ -775,8 +775,16 @@ let searchTimer;
 let visibleRange = { start: 0, end: 0 };
 let continuousEditor = null, mappedText = null, mappedBook = null, inverseChanges = [];
 let selectedRow = null, selectedKey = null;
+let statusText = '', statusError = false;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
-function message(text = '', error = false) { el('status').textContent = text; el('status').classList.toggle('error', error); }
+function message(text = '', error = false) { statusText = text; statusError = error; renderStatus(); }
+function renderStatus() {
+  const partial = !loading && !sending && !chooserOpen && hasPartialDelivery();
+  const sent = partial ? session.queue.filter(item => item.sent).length : 0;
+  const explanation = partial ? `העריכה נעולה זמנית כי ${sent} מתוך ${session.queue.length} דיווחים כבר נשלחו. כדי לחזור לערוך, ודאו שיש חיבור לרשת ולחצו על „המשך שליחה”. לאחר השלמת הדיווחים שנותרו העריכה תיפתח. הטיוטה נשמרה.` : '';
+  el('status').textContent = [statusText, explanation].filter(Boolean).join(' ');
+  el('status').classList.toggle('error', statusError);
+}
 function applyTheme(theme) {
   if (!theme?.colorScheme) return;
   for (const [key, color] of Object.entries(theme.colorScheme)) {
@@ -795,6 +803,7 @@ function hasEdits() { return session && session.editedText !== (session.reported
 function hasPartialDelivery() { return !session?.completed && session?.queue?.some(item => item.sent) && session.queue.some(item => !item.sent); }
 function controls() {
   const locked = loading || sending;
+  el('proposed').setAttribute('aria-describedby', 'status');
   el('proposed').readOnly = locked || !!hasPartialDelivery();
   el('send').hidden = !session || chooserOpen;
   el('change-book').hidden = !session || chooserOpen;
@@ -806,6 +815,7 @@ function controls() {
   for (const id of ['discard', 'load-current', 'open-books']) el(id).disabled = locked;
   el('pause').hidden = !sending;
   el('discard').textContent = session?.completed ? 'סיים' : 'ביטול התיקונים';
+  renderStatus();
 }
 function render() {
   renderBookTabs();

@@ -131,6 +131,27 @@ await evaluate(`document.getElementById('proposed').focus();document.getElementB
 await call('Input.insertText', {text:'טיוטת ספר ראשון'});
 await waitFor(`window.mockStoredSession.editedText==='טיוטת ספר ראשון' && window.mockStoredSession.queue===null`, 'new wording discards stale unsent reports and saves after restart');
 await call('Page.removeScriptToEvaluateOnNewDocument', {identifier:failedBoot.identifier});
+// A restored partial delivery must explain why typing is blocked and how to recover.
+const partialWorkspace = {schemaVersion:2,activeId:savedSession.id,sessions:[{...savedSession,completed:false,queue:savedSession.queue.map((item,index)=>({...item,sent:index===0}))}]};
+const partialBoot = await call('Page.addScriptToEvaluateOnNewDocument', {source:`window.mockStoredSession=${JSON.stringify(partialWorkspace)};`});
+await call('Page.reload');
+await waitFor(`document.getElementById('status').textContent.includes('העריכה נעולה זמנית')`, 'restored lock explanation');
+assert.equal(await evaluate(`document.getElementById('proposed').readOnly`), true);
+const lockText = await evaluate(`document.getElementById('status').textContent`);
+assert.match(lockText,/1 מתוך 2 דיווחים כבר נשלחו/);
+assert.match(lockText,/חיבור לרשת.*המשך שליחה.*העריכה תיפתח/);
+assert.equal(await evaluate(`document.getElementById('proposed').getAttribute('aria-describedby')`),'status');
+const lockScreenshot = await call('Page.captureScreenshot',{format:'png'});
+await writeFile(resolve('test/browser/plugin-locked-explanation.png'),Buffer.from(lockScreenshot.data,'base64'));
+await evaluate(`document.getElementById('change-book').click()`);
+await waitFor(`!document.getElementById('book-picker').hidden`, 'open book picker while delivery is partial');
+await evaluate(`document.getElementById('cancel-book-picker').click()`);
+assert.match(await evaluate(`document.getElementById('status').textContent`),/העריכה נעולה זמנית/,'navigation cannot clear a still-relevant explanation');
+await evaluate(`document.getElementById('editor').requestSubmit()`);
+await waitFor(`!document.getElementById('proposed').readOnly && document.getElementById('status').textContent.includes('נשלחו בהצלחה')`,'finishing pending reports unlocks editor');
+assert.equal(await evaluate(`document.getElementById('status').textContent.includes('העריכה נעולה')`),false);
+assert.equal(await evaluate(`window.mockReports.length`),1,'recovery sends only the remaining report');
+await call('Page.removeScriptToEvaluateOnNewDocument', {identifier:partialBoot.identifier});
 // Each tab must retain its draft, search state, selection and scroll position.
 await evaluate(`document.getElementById('proposed').value='טיוטת ספר ראשון'; document.getElementById('proposed').dispatchEvent(new Event('input',{bubbles:true})); document.getElementById('proposed').setSelectionRange(3,7); document.getElementById('nav-search-tab').click(); document.getElementById('book-search').value='טיוטת'; document.getElementById('book-search').dispatchEvent(new Event('input')); window.secondLines=Array.from({length:180},(_,i)=>'פסקה '+i+' '+('תוכן הספר השני '.repeat(20))); window.mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'second-book',id:2}});`);
 await waitFor(`document.getElementById('screen-title').textContent==='ספר שני' && !document.getElementById('proposed').readOnly`, 'second tab opens');
