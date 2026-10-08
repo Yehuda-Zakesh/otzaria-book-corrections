@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { storedWorkspace } from './stored-workspace.mjs';
+import { waitFor } from './wait-for.mjs';
 
 test('book tabs preserve independent drafts, reuse open books, and confirm closing unsent changes', async () => {
   class Element {
@@ -48,7 +49,7 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
   } } };
   try {
     await import('../plugin/app.js?book-picker');
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await waitFor(() => el('status').textContent === '' && el('library-list').children.length > 0, 'library initialization');
     const choose = async index => { await el('library-list').children[0].children[index].fire('click'); };
     assert.equal(el('empty').hidden, false);
     assert.equal(readerQueries, 0, 'home must load the library without querying open reader tabs');
@@ -105,7 +106,7 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     failSave = true;
     await el('book-tabs').children[1].children[0].fire('click');
     assert.equal(el('proposed').value, content.ראשון, 'switch does not wait for storage');
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await waitFor(() => el('status').textContent.includes('שמירת הטיוטה נכשלה'), 'background save failure');
     assert.match(el('status').textContent, /שמירת הטיוטה נכשלה/);
     await secondTab().fire('click');
     assert.equal(el('proposed').value, 'תיקון שטרם נשלח', 'failed background save preserves the draft in memory');

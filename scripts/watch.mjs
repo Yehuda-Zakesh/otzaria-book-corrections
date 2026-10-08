@@ -19,7 +19,7 @@ async function rebuild() {
 }
 
 const watcher = watch(new URL('../plugin/', import.meta.url), (_event, filename) => {
-  if (!['app.js', 'report.js', 'book.js', 'changes.js', 'text-display.js', 'book-reports.js', 'rpc.js', 'navigation.js', 'toc-tree.js', 'book-search.js', 'editor-window.js', 'library-order.js'].includes(String(filename))) return;
+  if (!['app.js', 'report-digest.js', 'report.js', 'book.js', 'correction-source.js', 'changes.js', 'text-display.js', 'book-reports.js', 'rpc.js', 'navigation.js', 'toc-tree.js', 'book-search.js', 'editor-window.js', 'library-order.js', 'draft-storage.js', 'source-guard.js', 'reader-corrections.js'].includes(String(filename))) return;
   clearTimeout(timer);
   timer = setTimeout(rebuild, 100);
 });

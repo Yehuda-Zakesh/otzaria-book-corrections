@@ -11,6 +11,13 @@
   <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
   <main>
     <p id="status" role="status" aria-live="polite">טוען…</p>
+    <section id="reader-corrections" hidden aria-labelledby="reader-book-title">
+      <strong id="reader-book-title"></strong>
+      <p id="reader-draft-status" role="status" aria-live="polite"></p>
+      <div id="reader-changes"></div>
+      <button id="reader-send" type="button">שלח תיקונים</button>
+      <button id="reader-end" type="button" class="ghost">סיים עריכה בקורא</button>
+    </section>
     <section id="empty" hidden>
       <div class="library-toolbar">
         <label for="library-search" class="sr-only">איתור ספר או מחבר בספרייה</label>

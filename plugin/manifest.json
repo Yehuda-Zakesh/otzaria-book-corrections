@@ -8,11 +8,11 @@
   "author": "Yehuda-Zakesh",
   "homepage": "https://github.com/Yehuda-Zakesh/otzaria-book-corrections",
   "entrypoint": "index.html",
-  "minAppVersion": "0.9.98",
+  "minAppVersion": "0.9.100",
   "sdkVersion": "1.x",
   "permissions": [
-    "app.user_email.read", "app.startup_contributions",
-    "reader.open", "reader.context_menu", "library.books.read", "library.content.read",
+    "app.user_email.read", "app.startup_contributions", "app.run_on_startup",
+    "reader.open", "reader.context_menu", "reader.local_edit", "feedback.send_email", "library.books.read", "library.content.read",
     "network.access", "settings.read", "events.subscribe:settings.changed"
   ],
   "network": { "enabled": true, "allowlist": ["https://otzaria.org/api/reportingerrors"] },
@@ -20,6 +20,9 @@
     "toolTab": { "title": "תיקוני ספרים", "iconName": "document_edit_24_regular", "defaultPinned": false },
     "startup": {
       "contextMenuItems": [{
+        "id": "correct-in-reader", "title": "עריכת הספר בקורא", "icon": "document_edit_24_regular",
+        "contexts": ["reader-book"], "openPlugin": false
+      }, {
         "id": "correct-book", "title": "העבר את הספר לתיקון", "icon": "document_edit_24_regular",
         "contexts": ["reader-selection", "reader-page-shape-selection"], "openPlugin": true
       }]

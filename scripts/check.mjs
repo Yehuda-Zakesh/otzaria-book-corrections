@@ -7,7 +7,7 @@ const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 assert.equal(pkg.version, manifest.version, 'package and manifest versions must match');
 const committed = await readFile('plugin/app.bundle.js', 'utf8');
 assert.equal(await build(), committed, 'Run npm run build and commit the generated bundle');
-assert.ok(!committed.includes('feedback.submitBookCorrection'), 'main must use only the existing reporting API');
+assert.ok(committed.includes('feedback.submitBookCorrection'), 'reader corrections use the native reporting API');
 for (const directory of ['plugin', 'scripts', 'test', 'test/browser']) {
   for (const file of await readdir(directory)) {
     if (!/\.(?:js|mjs)$/.test(file)) continue;

@@ -4,8 +4,13 @@ import { readFile } from 'node:fs/promises';
 import { runInNewContext } from 'node:vm';
 import { webcrypto } from 'node:crypto';
 import { build } from '../scripts/build.mjs';
+import { waitFor } from './wait-for.mjs';
 
 test('installed entrypoint runs a classic bundle and initializes after delayed SDK boot', async () => {
+  const manifest = JSON.parse(await readFile(new URL('../plugin/manifest.json', import.meta.url), 'utf8'));
+  const readerAction = manifest.contributes.startup.contextMenuItems.find(item => item.id === 'correct-in-reader');
+  assert.equal(readerAction.openPlugin, false, 'reader editing must keep the invoking book visible');
+  assert.ok(manifest.permissions.includes('app.run_on_startup'), 'the reader action must be able to activate without a plugin tab');
   const html = await readFile(new URL('../plugin/index.html', import.meta.url), 'utf8');
   assert.match(html, /<script src="app\.bundle\.js"><\/script>/);
   assert.doesNotMatch(html, /type=["']module["']/);
@@ -37,7 +42,7 @@ test('installed entrypoint runs a classic bundle and initializes after delayed S
   assert.equal(el('status').textContent, 'טוען…');
   booted = true;
   listeners.get('plugin.boot')({});
-  await new Promise(resolve => setTimeout(resolve, 150));
+  await waitFor(() => el('status').textContent === '' && el('empty').hidden === false, 'SDK boot and library initialization');
   assert.equal(el('status').textContent, '');
   assert.equal(el('empty').hidden, false);
   assert.ok(calls >= 2);

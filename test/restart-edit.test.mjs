@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { storedWorkspace } from './stored-workspace.mjs';
+import { waitFor } from './wait-for.mjs';
 
 test('a restored failed submission remains editable and changed text replaces only unsent reports', async () => {
   class Element {
@@ -39,7 +40,7 @@ test('a restored failed submission remains editable and changed text replaces on
     } } };
     return el;
   }
-  const settle = () => new Promise(resolve=>setTimeout(resolve,150));
+  const settle = () => waitFor(() => el('proposed').value.length > 0 && el('editor').hidden === false && el('status').textContent === '', 'restored editor initialization');
   const saved = () => { const w=storedWorkspace(storage);return w.sessions.find(s=>s.id===w.activeId); };
   let el = setup();
   try {
@@ -56,7 +57,8 @@ test('a restored failed submission remains editable and changed text replaces on
     el('proposed').value = edited; el('proposed').fire('input');
     await el('editor').fire('submit');
     assert.deepEqual(requests[2],requests[0],'input without a text change must also preserve the retry ID');
-    el('proposed').value = 'אה\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));
+    el('proposed').value = 'אה\nגד'; el('proposed').fire('input');
+    await waitFor(() => saved().editedText === 'אה\nגד' && el('draft-status').textContent === 'הטיוטה נשמרה', 'edited draft persistence');
     assert.equal(saved().editedText,'אה\nגד'); assert.equal(saved().queue,null);
     await el('editor').fire('submit');
     assert.notEqual(requests[3].report_id,requests[0].report_id);
@@ -68,7 +70,8 @@ test('a restored failed submission remains editable and changed text replaces on
     draft.queue.forEach(item=>{item.sent=true;}); draft.completed=false;
     el = setup(); await import('../plugin/app.js?acknowledged-edit-restart'); await settle();
     assert.equal(el('proposed').readOnly,false); assert.equal(el('send').disabled,true);
-    el('proposed').value='את\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));
+    el('proposed').value='את\nגד'; el('proposed').fire('input');
+    await waitFor(() => saved().editedText === 'את\nגד' && el('draft-status').textContent === 'הטיוטה נשמרה', 'new draft and acknowledged baseline persistence');
     assert.equal(saved().reportedText,'אה\nגד','acknowledged wording remains the baseline for later edits');
   } finally { delete globalThis.document;delete globalThis.window; }
 });

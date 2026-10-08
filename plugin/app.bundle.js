@@ -1313,6 +1313,127 @@ function createSourceGuard(call) {
   return { check, restore };
 }
 
+function createReaderCorrections(call, idFactory, changed = () => {}) {
+  let current = null, drafts = [], writes = Promise.resolve();
+  const sameBook = (a, b) => a.bookUid === b.bookUid && a.libraryVersion === b.libraryVersion;
+  const pending = draft => draft.changes.filter(change => !draft.deliveries.some(item =>
+    item.status && JSON.stringify(item.change) === JSON.stringify(change)));
+  function save() {
+    const value = structuredClone(drafts);
+    const write = writes.catch(() => {}).then(() => call('storage.set', { key: 'reader-correction-drafts', value }));
+    writes = write; return write;
+  }
+  function updateDraft(snapshot) {
+    let draft = drafts.find(item => sameBook(item, snapshot));
+    if (!draft) { draft = { bookId: snapshot.bookId, bookUid: snapshot.bookUid,
+      libraryVersion: snapshot.libraryVersion, changes: [], deliveries: [] }; drafts.push(draft); }
+    draft.changes = structuredClone(snapshot.changes);
+    return draft;
+  }
+  async function accept(snapshot) {
+    if (current?.snapshot.sessionId === snapshot.sessionId && snapshot.revision < current.snapshot.revision) return current;
+    const draft = updateDraft(snapshot);
+    current = { snapshot, draft };
+    await save(); changed(current);
+    return current;
+  }
+  async function refresh() {
+    if (!current) return;
+    if (current.restoreRejected) throw new Error('לא ניתן לשחזר את הטיוטה מול מקור הספר הנוכחי. הטיוטה נשמרה.');
+    const sessionId = current.snapshot.sessionId;
+    const snapshot = await call('reader.getCorrectionSession', { sessionId });
+    if (current?.snapshot.sessionId !== sessionId || snapshot.revision < current.snapshot.revision) return;
+    return accept(snapshot);
+  }
+  async function reloadDrafts() {
+    await writes;
+    drafts = await call('storage.get', { key: 'reader-correction-drafts' }) ?? [];
+    if (current) current.draft = drafts.find(item => sameBook(item, current.snapshot)) ?? current.draft;
+  }
+  async function resume() {
+    await reloadDrafts();
+    if (!drafts.length && !current) return;
+    const state = await call('reader.getCurrentState');
+    const ids = (state?.openTabs ?? []).map(tab => tab.correctionSessionId).filter(Boolean);
+    const sessionId = ids.includes(current?.snapshot.sessionId) ? current.snapshot.sessionId
+      : state?.currentCorrectionSessionId ?? ids[0];
+    if (!sessionId) { current = null; changed(current); return; }
+    try { return await accept(await call('reader.getCorrectionSession', { sessionId })); }
+    catch (error) {
+      if (error.code !== 'error.not_found') throw error;
+      current = null; changed(current);
+    }
+  }
+  async function begin(tabId) {
+    await reloadDrafts();
+    if (current && current.snapshot.tabId !== tabId) throw new Error('סיימו תחילה את העריכה בקורא בספר הנוכחי.');
+    if (current && !current.restoreRejected) await refresh();
+    const snapshot = await call('reader.beginCorrectionSession', { tabId });
+    const draft = drafts.find(item => sameBook(item, snapshot));
+    if (draft?.changes.length && !snapshot.changes.length) {
+      // Keep the durable draft if validation rejects a changed library source.
+      current = { snapshot, draft, restoreRejected: true };
+      try {
+        const restored = await call('reader.restoreCorrectionDraft', { sessionId: snapshot.sessionId,
+          bookUid: draft.bookUid, libraryVersion: draft.libraryVersion,
+          expectedRevision: snapshot.revision, changes: draft.changes });
+        return accept(restored);
+      } catch (error) { changed(current); throw error; }
+    }
+    return accept(snapshot);
+  }
+  async function send() {
+    const sessionId = current?.snapshot.sessionId;
+    await refresh();
+    const active = current;
+    if (!active || active.snapshot.sessionId !== sessionId) throw new Error('פתחו את הספר בקורא כדי לשלוח את התיקונים.');
+    for (const change of pending(active.draft)) {
+      let delivery = active.draft.deliveries.find(item => JSON.stringify(item.change) === JSON.stringify(change));
+      if (!delivery) { delivery = { change: structuredClone(change), reportId: idFactory() }; active.draft.deliveries.push(delivery); }
+      await save();
+      const result = await call('feedback.submitBookCorrection', { reportId: delivery.reportId,
+        bookId: active.draft.bookId, bookUid: active.draft.bookUid, sectionIndex: change.sectionIndex,
+        snapshots: [{ index: change.sectionIndex, text: change.originalText }],
+        original: change.originalText, proposed: change.proposedText, allowQueue: false });
+      if (!['sent', 'queued'].includes(result?.status)) throw new Error('אוצריא לא אישרה את קבלת התיקון. הטיוטה נשמרה.');
+      delivery.status = result.status; delivery.correctionSupported = result.correctionSupported;
+      await save(); changed(current);
+    }
+  }
+  async function end() {
+    const sessionId = current?.snapshot.sessionId;
+    if (!current?.restoreRejected) await refresh();
+    if (!current || current.snapshot.sessionId !== sessionId) return;
+    const active = current;
+    await call('reader.endCorrectionSession', { sessionId: active.snapshot.sessionId, expectedRevision: active.snapshot.revision });
+    if (current === active) { current = null; changed(current); }
+  }
+  async function ended(event) {
+    if (!current) {
+      await reloadDrafts();
+      if (current) return;
+      updateDraft(event.snapshot);
+      await save(); changed(current);
+      return;
+    }
+    if (event.sessionId !== current?.snapshot.sessionId) return;
+    if (!current.restoreRejected && event.snapshot.revision >= current.snapshot.revision) updateDraft(event.snapshot);
+    current = null; changed(current);
+    await save();
+  }
+  async function reset(sectionIndex) {
+    const sessionId = current?.snapshot.sessionId;
+    await refresh();
+    if (!current || current.snapshot.sessionId !== sessionId) return;
+    const snapshot = await call('reader.resetCorrection', { sessionId,
+      sectionIndex, expectedRevision: current.snapshot.revision });
+    if (current?.snapshot.sessionId === sessionId) return accept(snapshot);
+  }
+  return { begin, refresh, resume, send, end, ended, reset, pending,
+    read: resume,
+    get current() { return current; }, get drafts() { return drafts; } };
+}
+
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
 let session = null, initialized, loading = false, sending = false, pause = false;
@@ -1334,6 +1455,43 @@ let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
 const draftStorage = createDraftStorage(call, newId), sourceGuard = createSourceGuard(call);
+const readerCorrections = createReaderCorrections(call, newId, renderReaderCorrections);
+let readerBusy = false;
+function renderReaderCorrections() {
+  const active = readerCorrections.current;
+  render();
+  el('reader-corrections').hidden = !active;
+  if (!active) return;
+  el('reader-book-title').textContent = `תיקונים בקורא: ${active.snapshot.bookId}`;
+  const rows = active.snapshot.changes.map(change => {
+    const row = document.createElement('article'); row.className = 'reader-change';
+    const title = document.createElement('strong'); title.textContent = `פסקה ${change.sectionIndex + 1}`;
+    const original = document.createElement('p'); original.textContent = `מקור: ${change.originalText}`;
+    const proposed = document.createElement('p'); proposed.textContent = `מוצע: ${change.proposedText || '(מחיקה)'}`;
+    const reset = document.createElement('button'); reset.type = 'button'; reset.className = 'ghost'; reset.textContent = 'בטל תיקון';
+    reset.disabled = readerBusy;
+    reset.addEventListener('click', () => runReaderAction(() => readerCorrections.reset(change.sectionIndex)));
+    row.append(title, original, proposed, reset); return row;
+  });
+  el('reader-changes').replaceChildren(...rows);
+  const pending = readerCorrections.pending(active.draft).length;
+  el('reader-draft-status').textContent = rows.length ? `${rows.length} תיקונים נשמרו בטיוטה; ${pending} ממתינים לשליחה.` : 'ערכו את טקסט הספר בקורא אוצריא. השינויים יופיעו כאן.';
+  el('reader-send').disabled = readerBusy || !pending || active.restoreRejected;
+  el('reader-end').disabled = readerBusy;
+}
+async function runReaderAction(action) {
+  if (readerBusy) return;
+  readerBusy = true; renderReaderCorrections();
+  try { await action(); }
+  catch (error) { message(error.message, true); }
+  finally { readerBusy = false; renderReaderCorrections(); }
+}
+el('reader-send').addEventListener('click', () => runReaderAction(async () => {
+  await readerCorrections.send(); message('התיקונים נשלחו בהצלחה וממתינים לבדיקה ידנית.');
+}));
+el('reader-end').addEventListener('click', () => runReaderAction(async () => {
+  await readerCorrections.end(); message('העריכה בקורא הסתיימה. הטיוטה נשמרה וניתן לשחזר אותה באמצעות פתיחת העריכה בספר.');
+}));
 const searchBook = createAsyncBookSearch();
 function message(text = '', error = false, duration = 0) {
   clearTimeout(statusTimer);
@@ -1386,8 +1544,8 @@ function controls() {
   const locked = loading || sending;
   el('proposed').setAttribute('aria-describedby', 'status');
   el('proposed').readOnly = locked || !!hasPartialDelivery();
-  el('send').hidden = !session || chooserOpen;
-  el('change-book').hidden = false;
+  el('send').hidden = !!readerCorrections.current || !session || chooserOpen;
+  el('change-book').hidden = !!readerCorrections.current;
   el('change-book').disabled = locked;
   for (const button of el('book-tabs').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('cancel-book-picker').disabled = locked;
@@ -1400,6 +1558,13 @@ function controls() {
   renderStatus();
 }
 function render() {
+  if (readerCorrections.current) {
+    for (const id of ['editor', 'empty', 'book-tabs']) el(id).hidden = true;
+    document.querySelector('main').classList.toggle('reading', false);
+    el('screen-title').textContent = readerCorrections.current.snapshot.bookId;
+    controls();
+    return;
+  }
   if (searchSession !== session || chooserOpen) { searchBook.clear(); searchGeneration++; searchSession = session; }
   renderBookTabs();
   el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
@@ -1757,6 +1922,17 @@ function finishLibraryTab() {
 }
 let openings = Promise.resolve();
 function requestBook(event) {
+  if (event.itemId === 'correct-in-reader') {
+    openings = openings.catch(() => {}).then(async () => {
+      await initialized;
+      await runReaderAction(async () => {
+        const tabId = event.selection?.tabId ?? event.tabId;
+        if (!tabId) throw new Error('מזהה לשונית הקורא חסר. פתחו את הפעולה מחדש מתוך הספר.');
+        await readerCorrections.begin(tabId);
+      });
+    }).catch(error => message(error.message, true));
+    return;
+  }
   if (!['correct-book', 'correct-selection'].includes(event.itemId)) return;
   openings = openings.catch(() => {}).then(async () => {
     await initialized;
@@ -2009,6 +2185,7 @@ el('editor').addEventListener('submit', async event => {
 });
 async function initialize(boot) {
   applyTheme(boot?.theme);
+  await readerCorrections.read();
   const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
     call('settings.get', { key: 'key-library-view-mode' })]);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
@@ -2056,6 +2233,11 @@ async function refreshActiveDisplay() {
   initializeVisibleEditor();
 }
 if (host) {
+  host.on('reader.correctionSessionChanged', event => {
+    initialized?.then(() => event.sessionId === readerCorrections.current?.snapshot.sessionId
+      ? readerCorrections.refresh() : readerCorrections.resume()).catch(error => message(error.message, true));
+  });
+  host.on('reader.correctionSessionEnded', event => initialized?.then(() => readerCorrections.ended(event)).catch(error => message(error.message, true)));
   host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook);
   host.on('settings.changed', event => { if (event.key === 'key-library-view-mode') applyLibraryMode(event.newValue); });
   host.on('plugin.permissions_changed', event => {
@@ -2064,6 +2246,7 @@ if (host) {
   host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') showLibrary(); });
   host.on('plugin.suspended', () => { if (session || libraryTabs.length) { captureView(); persist().catch(error => message(error.message, true)); } });
   host.on('plugin.resumed', () => {
+    initialized?.then(() => { if (!readerBusy) return readerCorrections.resume(); }).catch(error => message(error.message, true));
     initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
     refreshActiveDisplay().catch(error => message(error.message, true));
   });
