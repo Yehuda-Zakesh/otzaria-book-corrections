@@ -57,6 +57,14 @@ function canonical(value) {
   throw new Error('נתוני הדיווח אינם תקינים.');
 }
 
+// SDK libraryPath omits the "אוצריא/" prefix and the extension. The site derives the
+// repository path from the full relative path, so rebuild it (the site verifies it).
+function libraryRelativePath(libraryPath) {
+  if (typeof libraryPath !== 'string' || !libraryPath.trim()) return '';
+  const path = libraryPath.trim().replaceAll('\\', '/');
+  return (path.startsWith('אוצריא/') ? path : `אוצריא/${path}`) + (/\.txt$/i.test(path) ? '' : '.txt');
+}
+
 function validateSelection(selection, map) {
   if (selection.sections?.length > 1) throw new Error('לתיקון מדויק, סמנו קטע מתוך פסקה אחת.');
   if (selection.type && selection.type !== 'text') throw new Error('תיקוני טקסט זמינים לספרי טקסט בלבד.');
@@ -122,6 +130,7 @@ async function buildReport(draft, email) {
       throw new Error('טווח התיקון אינו תואם למקור הגולמי.');
     }
   }
+  const filePath = libraryRelativePath(draft.details.libraryPath);
   const target = correction ? correction.original_selection ?? correction.original_line : original;
   const proposed = correction ? correction.proposed_text : draft.proposed;
   const proposedDisplay = proposed === '' ? '(מחיקה)' : proposed;
@@ -130,13 +139,13 @@ async function buildReport(draft, email) {
     report_id: draft.id, sender_email: email, subject: reportDisplay(`הצעת תיקון: ${title}`, 500),
     book_title: reportDisplay(title, 300), current_ref: reportDisplay(ref, 300), line_number: index + 1,
     selected_text: reportDisplay(original, 10000), error_details: `${location}\n\n${draft.note ? `${draft.note}\n\n` : ''}${fallback}`,
-    context_text: reportDisplay(correction ? correction.original_line : line, 20000), file_path: draft.details.libraryPath ?? '',
+    context_text: reportDisplay(correction ? correction.original_line : line, 20000), file_path: filePath,
     source_folder: draft.details.textSource?.key ?? '', library_version: 'unknown',
     created_at: draft.createdAt,
     schema_version: 2, report_kind: correction ? 'text_correction' : 'free_text',
     location: { line_index: index, book_id: draft.sourceBookId ?? null, library_build_id: null, he_ref: null },
     source_hint: { source_folder: draft.details.textSource?.key ?? '',
-      library_relative_path: draft.details.libraryPath ?? '', repo_path: null },
+      library_relative_path: filePath, repo_path: null },
     client: draft.client ?? null,
     ...(correction ? { correction } : {})
   };

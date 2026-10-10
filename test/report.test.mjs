@@ -174,3 +174,13 @@ test('delivery summary distinguishes server-confirmed corrections from free or u
   assert.match(reportDeliveryMessage([structured, unsupported, free, legacy, { ...structured, sent: false }]),
     /1 הצעות תיקון מובנות אושרו באתר; 2 הצעות נשלחו כדיווח חופשי.*1 הצעות נשלחו, אך האתר לא אישר/);
 });
+
+test('library path hints match the site resolver contract', async () => {
+  const { libraryRelativePath } = await import('../plugin/report.js');
+  assert.equal(libraryRelativePath('תנך/ספר לדוגמה'), 'אוצריא/תנך/ספר לדוגמה.txt');
+  assert.equal(libraryRelativePath('אוצריא/תנך/ספר.txt'), 'אוצריא/תנך/ספר.txt');
+  assert.equal(libraryRelativePath(null), '');
+  const payload = await buildReport(draft(), 'a@b.co');
+  assert.equal(payload.file_path, 'אוצריא/תנך/ספר לדוגמה.txt');
+  assert.equal(payload.source_hint.library_relative_path, payload.file_path);
+});
