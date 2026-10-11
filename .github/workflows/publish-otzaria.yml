@@ -39,7 +39,7 @@ jobs:
       - uses: Otzaria/otzaria-plugin-validator@64ee7c7806a03fcba16c111a7b6c3185e4d92804 # v1, 1.19.1
         id: store
         with:
-          path: dist/book-corrections-${{ needs.qa.outputs.version }}.otzplugin
+          path: plugin
           publish: 'true'
           fail-on-warnings: 'true'
           app-version: '0.9.98'
