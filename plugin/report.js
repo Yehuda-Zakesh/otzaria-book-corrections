@@ -74,7 +74,7 @@ export async function buildReport(draft, email) {
   if (!Number.isInteger(index) || index < 0) throw new Error('מיקום הקטע חסר. סמנו אותו מחדש.');
   const title = selection.bookTitle ?? selection.currentBook ?? selection.bookId;
   const ref = selection.currentRef?.trim() || `פסקה ${index + 1}`;
-  const location = `ספר: ${title}\nמיקום: ${ref}\nמספר שורה במקור: ${index + 1}`;
+  const location = `ספר: ${title}\nמיקום: ${ref}\nמספר שורה במקור: ${index + 1}\nנשלח באמצעות תוסף תיקוני ספרים`;
   const correction = draft.correction ?? null;
   if (correction) {
     const range = correction.selection_offset;

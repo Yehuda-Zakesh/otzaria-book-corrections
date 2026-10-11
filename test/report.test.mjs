@@ -40,7 +40,7 @@ test('builds v2 free-text report with both texts, source routing and 1-based lin
   assert.equal(payload.source_folder, 'Sefaria');
   assert.equal(payload.context_text, line);
   assert.equal(payload.current_ref, 'פרק ג');
-  assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פרק ג\nמספר שורה במקור: 43\n\n'));
+  assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פרק ג\nמספר שורה במקור: 43\nנשלח באמצעות תוסף תיקוני ספרים\n\n'));
   assert.equal(payload.selected_text, 'אָב');
   assert.match(payload.error_details, /מקור: אָב\nמוצע: אֵם/);
   assert.equal('correction' in payload, false);
@@ -58,7 +58,7 @@ test('missing or blank references retain a readable source location in the repor
     const payload = await buildReport(value, 'me@example.com');
     assert.equal(payload.current_ref, 'פסקה 43');
     assert.equal(payload.line_number, 43);
-    assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פסקה 43\nמספר שורה במקור: 43\n\nהערת המדווח\n\n'));
+    assert.ok(payload.error_details.startsWith('ספר: ספר לדוגמה\nמיקום: פסקה 43\nמספר שורה במקור: 43\nנשלח באמצעות תוסף תיקוני ספרים\n\nהערת המדווח\n\n'));
   }
 });
 test('preserves whitespace, nikud and punctuation without normalization', async () => {
