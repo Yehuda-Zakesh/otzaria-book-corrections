@@ -21,9 +21,9 @@ test('a restored failed submission remains editable and changed text replaces on
     const el = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
     globalThis.document = {getElementById:el,createElement:()=>new Element(),querySelector:()=>el('main'),documentElement:{style:{setProperty(){}}}};
     globalThis.window = { Otzaria: { _booted:true, on(){}, call(method,args={}) {
-      if (method === 'network.fetchStream') return (async function* () {
-        requests.push(JSON.parse(args.body)); throw new Error('Network unavailable');
-      })();
+      if (method === 'feedback.submitBookCorrection') {
+        requests.push(structuredClone(args)); return Promise.resolve({success:false,error:{message:'Network unavailable'}});
+      }
       let data = null;
       if (method === 'storage.get') data = structuredClone(storage.get(args.key));
       else if (method === 'storage.set') storage.set(args.key,structuredClone(args.value));
@@ -59,9 +59,8 @@ test('a restored failed submission remains editable and changed text replaces on
     el('proposed').value = 'אה\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));
     assert.equal(saved().editedText,'אה\nגד'); assert.equal(saved().queue,null);
     await el('editor').fire('submit');
-    assert.notEqual(requests[3].report_id,requests[0].report_id);
-    assert.match(requests[3].error_details,/מוצע: ה/);
-    assert.doesNotMatch(requests[3].error_details,/מוצע: ם/);
+    assert.notEqual(requests[3].reportId,requests[0].reportId);
+    assert.equal(requests[3].proposed,'ה');
     // A crash after the last acknowledgment but before completed=true cannot lock the restored book.
     const workspace=storage.get('book-session');
     const draft = storage.get(workspace.sessions[0].draftKey);

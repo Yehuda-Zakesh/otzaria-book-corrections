@@ -38,7 +38,11 @@ const restore=p=>{if(!Array.isArray(p))return book.originalText.slice(0,p.start)
 return {...state,book:{...book,sections:book.sections.map(s=>({...s,text:book.originalText.slice(s.start,s.end)}))},editedText:restore(editedPatch),...(reportedPatch?{reportedText:restore(reportedPatch)}:{})};
 })});
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
-if(method==='network.fetchStream') return (async function*(){ window.mockReports.push(JSON.parse(args.body)); if(window.mockNetworkFails) throw new Error('Network unavailable'); yield {type:'response',status:200}; yield {type:'data',body:JSON.stringify(window.mockEmailFails ? {success:true,accepted:true,savedToDatabase:true,email_sent:false,duplicate:false} : {success:true,correction_supported:window.mockCorrectionSupported!==false})}; })();
+if(method==='feedback.submitBookCorrection') return (async()=>{
+if(window.mockNetworkFails) throw new Error('Network unavailable');
+if(window.mockEmailFails) throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען.');
+window.mockReports.push({report_id:args.reportId,line_number:args.sectionIndex+1,error_details:args.details+' מוצע: '+args.proposed,schema_version:2,report_kind:args.forceFreeText?'free_text':'text_correction',correction:!args.forceFreeText});
+return {success:true,data:{status:'sent',correctionSupported:window.mockCorrectionSupported!==false}};})();
 return (async()=>{ let data = null;
 if(method==='app.getTheme') data=mockTheme;
 else if(method==='settings.get') data=window.mockLibraryMode;
@@ -186,9 +190,6 @@ assert.ok(submission.mockReports.length >= 2);
 assert.ok(submission.mockReports.some(report => report.line_number === 1));
 assert.ok(submission.mockReports.some(report => report.line_number === 2));
 assert.ok(submission.mockReports.every(report => report.report_id && report.error_details.includes('מוצע:')));
-assert.ok(submission.mockReports.every(report => report.current_ref && report.error_details.includes(`מיקום: ${report.current_ref}\nמספר שורה במקור: ${report.line_number}`)));
-assert.ok(submission.mockReports.some(report => report.line_number === 1 && report.current_ref === 'ראשית'));
-assert.ok(submission.mockReports.some(report => report.line_number === 2 && report.current_ref === 'המשך'));
 assert.ok(submission.mockReports.every(report => report.schema_version === 2 && report.report_kind === 'text_correction' && report.correction));
 assert.match(submission.status, /2 הצעות תיקון מובנות אושרו באתר/);
 const savedSession = await evaluate('window.mockStoredSession');

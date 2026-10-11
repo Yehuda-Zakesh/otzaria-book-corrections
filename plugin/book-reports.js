@@ -106,7 +106,15 @@ export async function prepareReports(session, changes, email, call, idFactory, o
           bookId: session.book.identity.bookId, sectionIndex: partFirst.index,
           currentRef: map.currentRef?.trim() || reportTocRef(session.book.toc, partFirst.index) }
       }, email);
-      queue.push({ payload, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
+      // Otzaria fills the library build, heRef, DB book ID and full source path itself.
+      const partLast = sectionAt(session.book.sections, Math.max(partStart, partStart + original.length - 1));
+      const localStart = partStart - partFirst.start;
+      const submission = { reportId: payload.report_id, ...session.book.identity, sectionIndex: partFirst.index,
+        ...(partLast.index !== partFirst.index ? { endSectionIndex: partLast.index } : {}),
+        snapshots: session.book.sections.slice(partFirst.index, partLast.index + 1).map(({ index, text }) => ({ index, text })),
+        original, proposed, details: reportNote, allowQueue: false, forceFreeText: !correction,
+        ...(partLast.index === partFirst.index ? { sourceStart: localStart, sourceEnd: localStart + original.length } : {}) };
+      queue.push({ payload, submission, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
     }
     onProgress(i + 1, reportChanges.length);
   }

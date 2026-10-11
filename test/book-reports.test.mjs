@@ -198,3 +198,21 @@ test('valid 20,000-unit source corrections are not unnecessarily split at the fr
   assert.equal(queue[0].payload.correction.proposed_text, proposed);
   assert.ok(queue[0].payload.selected_text.length <= 10000);
 });
+
+test('queue items carry the Otzaria submission with local source offsets', async () => {
+  const f = fixture(['אבג', 'דהו']);
+  const second = f.session.book.sections[1];
+  const [item] = await prepare(f, [{ start: second.start + 1, end: second.start + 2, original: 'ה', proposed: 'ז' }]);
+  assert.deepEqual(item.submission, { reportId: item.payload.report_id, bookId: 'ספר בדיקה', bookUid: 'id:18',
+    sectionIndex: 1, snapshots: [{ index: 1, text: 'דהו' }], original: 'ה', proposed: 'ז', details: item.submission.details,
+    allowQueue: false, forceFreeText: true, sourceStart: 1, sourceEnd: 2 });
+});
+
+test('a change spanning paragraphs is submitted with its section range', async () => {
+  const f = fixture(['אבג', 'דהו']);
+  const [item] = await prepare(f, [{ start: 1, end: 6, original: 'בג\nדה', proposed: 'x' }]);
+  assert.equal(item.submission.sectionIndex, 0);
+  assert.equal(item.submission.endSectionIndex, 1);
+  assert.equal(item.submission.snapshots.length, 2);
+  assert.equal('sourceStart' in item.submission, false);
+});

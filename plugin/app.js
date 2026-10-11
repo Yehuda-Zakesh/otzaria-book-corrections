@@ -2,7 +2,7 @@ import { loadBook, MAX_BOOK_BYTES } from './book.js';
 import { sortLibraryTree, filterLibraryTree } from './library-order.js';
 import { diffBook } from './changes.js';
 import { readNikudDisplay, projectNikud, applyDisplayEdit } from './text-display.js';
-import { sendReport, reportDeliveryMessage } from './report.js';
+import { deliverReport, reportDeliveryMessage } from './report.js';
 import { verifyQueuedCorrectionSources } from './correction-source.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
@@ -671,6 +671,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     const sourceBook = await sourceGuard.check(session.book, queuedSourceSections(session));
     verifyQueuedCorrectionSources(session.queue, sourceBook);
+    // Queues prepared before reports went through Otzaria have no submission; rebuild them from the draft.
+    if (session.queue?.some(item => !item.sent && !item.submission)) session.queue = null;
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -687,10 +689,11 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        const response = await sendReport(host, item.payload);
-        item.correctionSupported = item.payload.report_kind === 'text_correction' ? response.correction_supported === true : false;
+        item.correctionSupported = await deliverReport(call, item);
       } catch (error) {
-        if (error.status === 409) { item.payload.report_id = newId(); await persist(); }
+        if (error.status === 409) {
+          item.payload.report_id = newId(); item.submission.reportId = item.payload.report_id; await persist();
+        }
         throw error;
       }
       item.sent = true; sent++; await persist();

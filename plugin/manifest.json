@@ -2,20 +2,19 @@
   "schemaVersion": 1,
   "id": "org.otzaria.community.book-corrections",
   "name": "תיקוני ספרים",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "stability": "experimental",
   "description": "עריכת עותק של ספר והפיכת השינויים לדיווחי שגיאות לאוצריא.",
   "author": "Yehuda-Zakesh",
   "homepage": "https://github.com/Yehuda-Zakesh/otzaria-book-corrections",
   "entrypoint": "index.html",
-  "minAppVersion": "0.9.98",
+  "minAppVersion": "0.9.99",
   "sdkVersion": "1.x",
   "permissions": [
     "app.user_email.read", "app.startup_contributions",
     "reader.open", "reader.context_menu", "library.books.read", "library.content.read",
-    "network.access", "settings.read", "events.subscribe:settings.changed"
+    "settings.read", "events.subscribe:settings.changed"
   ],
-  "network": { "enabled": true, "allowlist": ["https://otzaria.org/api/reportingerrors"] },
   "contributes": {
     "toolTab": { "title": "תיקוני ספרים", "iconName": "document_edit_24_regular", "defaultPinned": false },
     "startup": {

@@ -42,7 +42,7 @@ jobs:
           path: plugin
           publish: 'true'
           fail-on-warnings: 'true'
-          app-version: '0.9.98'
+          app-version: '0.9.99'
           otzaria-user: ${{ secrets.OTZARIA_USER }}
           otzaria-password: ${{ secrets.OTZARIA_PASSWORD }}
           screenshots: screenshots/main.png

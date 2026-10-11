@@ -68,7 +68,7 @@ jobs:
           path: plugin
           publish: 'false'
           fail-on-warnings: 'true'
-          app-version: '0.9.98'
+          app-version: '0.9.99'
       - run: npm run pack
       - name: Read version
         id: version

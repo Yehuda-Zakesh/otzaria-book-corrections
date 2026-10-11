@@ -40,7 +40,6 @@ function reportSha256(text) {
   return hash.map(value => value.toString(16).padStart(8, '0')).join('');
 }
 
-const ENDPOINT = 'https://otzaria.org/api/reportingerrors';
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
 function canonical(value) {
@@ -158,34 +157,16 @@ async function buildReport(draft, email) {
   return payload;
 }
 
-async function sendReport(host, payload) {
-  let status = 0, body = '';
-  for await (const chunk of host.call('network.fetchStream', {
-    url: ENDPOINT, method: 'POST', timeoutMs: 30000,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' },
-    body: JSON.stringify(payload)
-  })) {
-    if (chunk.type === 'response') status = chunk.status;
-    if (chunk.type === 'data') body += chunk.body;
-    if (body.length > 65536) throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.');
-  }
-  if (status !== 200) {
-    const message = status === 409 ? 'מזהה הדיווח כבר שייך לתוכן אחר.' :
-      status === 429 ? 'נשלחו יותר מדי דיווחים. נסו שוב מאוחר יותר.' :
-      [400, 413, 422].includes(status) ? 'השרת דחה את הדיווח.' : 'השליחה לא הושלמה. נסו שוב.';
-    const error = new Error(`${message} התיקון נשמר.`);
-    error.status = status;
+// Otzaria sends the report itself (feedback.submitBookCorrection), so the plugin needs no network access.
+async function deliverReport(call, item) {
+  let result;
+  try { result = await call('feedback.submitBookCorrection', item.submission); }
+  catch (error) {
+    if (error.code === 'error.report_id_conflict') error.status = 409;
     throw error;
   }
-  let response;
-  try { response = JSON.parse(body); } catch { throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.'); }
-  if (response?.success !== true) throw new Error('השרת לא אישר את קבלת הדיווח. התיקון נשמר.');
-  // Intake success does not imply email delivery. Retry with the same report ID:
-  // the server can retry its notification without creating another report.
-  if (response.email_sent === false && response.duplicate !== true) {
-    throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען. התיקון נשמר לניסיון חוזר.');
-  }
-  return response;
+  if (result?.status !== 'sent') throw new Error('אוצריא לא אישרה את קבלת הדיווח. התיקון נשמר.');
+  return item.payload.report_kind === 'text_correction' && result.correctionSupported === true;
 }
 
 function reportDeliveryMessage(queue) {
@@ -661,7 +642,15 @@ async function prepareReports(session, changes, email, call, idFactory, onProgre
           bookId: session.book.identity.bookId, sectionIndex: partFirst.index,
           currentRef: map.currentRef?.trim() || reportTocRef(session.book.toc, partFirst.index) }
       }, email);
-      queue.push({ payload, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
+      // Otzaria fills the library build, heRef, DB book ID and full source path itself.
+      const partLast = sectionAt(session.book.sections, Math.max(partStart, partStart + original.length - 1));
+      const localStart = partStart - partFirst.start;
+      const submission = { reportId: payload.report_id, ...session.book.identity, sectionIndex: partFirst.index,
+        ...(partLast.index !== partFirst.index ? { endSectionIndex: partLast.index } : {}),
+        snapshots: session.book.sections.slice(partFirst.index, partLast.index + 1).map(({ index, text }) => ({ index, text })),
+        original, proposed, details: reportNote, allowQueue: false, forceFreeText: !correction,
+        ...(partLast.index === partFirst.index ? { sourceStart: localStart, sourceEnd: localStart + original.length } : {}) };
+      queue.push({ payload, submission, sent: false, sourceSections: Array.from({ length: last.index - first.index + 1 }, (_, index) => first.index + index) });
     }
     onProgress(i + 1, reportChanges.length);
   }
@@ -1981,6 +1970,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     const sourceBook = await sourceGuard.check(session.book, queuedSourceSections(session));
     verifyQueuedCorrectionSources(session.queue, sourceBook);
+    // Queues prepared before reports went through Otzaria have no submission; rebuild them from the draft.
+    if (session.queue?.some(item => !item.sent && !item.submission)) session.queue = null;
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -1997,10 +1988,11 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        const response = await sendReport(host, item.payload);
-        item.correctionSupported = item.payload.report_kind === 'text_correction' ? response.correction_supported === true : false;
+        item.correctionSupported = await deliverReport(call, item);
       } catch (error) {
-        if (error.status === 409) { item.payload.report_id = newId(); await persist(); }
+        if (error.status === 409) {
+          item.payload.report_id = newId(); item.submission.reportId = item.payload.report_id; await persist();
+        }
         throw error;
       }
       item.sent = true; sent++; await persist();

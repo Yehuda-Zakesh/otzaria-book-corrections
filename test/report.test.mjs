@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { buildReport, canonical, reportContentDigest, reportDeliveryMessage, sendReport, validateSelection, ENDPOINT } from '../plugin/report.js';
+import { buildReport, canonical, reportContentDigest, reportDeliveryMessage, deliverReport, validateSelection } from '../plugin/report.js';
 import { reportSha256 } from '../plugin/report-digest.js';
 
 const line = 'אָב 😀 אָב סוף';
@@ -80,49 +80,18 @@ test('rejects excessive text and missing locations', async () => {
   await assert.rejects(buildReport(value, 'me@example.com'));
 });
 
-function host(status, body, seen = []) {
-  return { call: async function* (method, args) {
-    seen.push({ method, args });
-    yield { type: 'response', status };
-    yield { type: 'data', body: body.slice(0, 7) };
-    yield { type: 'data', body: body.slice(7) };
-  } };
-}
-test('sends via native bridge and joins split JSON response chunks', async () => {
-  const seen = [], payload = await buildReport(draft(), 'me@example.com');
-  assert.deepEqual(await sendReport(host(200, '{"success":true}', seen), payload), { success: true });
-  assert.equal(seen[0].method, 'network.fetchStream');
-  assert.equal(seen[0].args.url, ENDPOINT);
-  assert.deepEqual(JSON.parse(seen[0].args.body), payload);
+test('delivery goes through Otzaria and reports whether the site accepted a structured correction', async () => {
+  const seen = [], payload = await buildReport(draft(), 'me@example.com'), item = { payload: { ...payload, report_kind: 'text_correction' }, submission: { reportId: 'a' } };
+  const call = (status, correctionSupported) => async (method, args) => { seen.push({ method, args }); return { status, correctionSupported }; };
+  assert.equal(await deliverReport(call('sent', true), item), true);
+  assert.equal(await deliverReport(call('sent', false), item), false);
+  assert.equal(seen[0].method, 'feedback.submitBookCorrection');
+  assert.equal(seen[0].args, item.submission);
+  await assert.rejects(deliverReport(call('queued', null), item), /לא אישרה/);
 });
-test('retries the same payload with the same id and accepts duplicate receipt', async () => {
-  const seen = [], payload = await buildReport(draft(), 'me@example.com');
-  await assert.rejects(sendReport(host(503, '{}', seen), payload));
-  const response = await sendReport(host(200, '{"success":true,"duplicate":true}', seen), payload);
-  assert.equal(response.duplicate, true);
-  assert.equal(seen[0].args.body, seen[1].args.body);
-});
-test('a content-filter HTML page with status 200 is not a successful send', async () => {
-  await assert.rejects(sendReport(host(200, '<html>blocked</html>'), {}));
-});
-
-test('intake success with failed email remains retryable using the same report id', async () => {
-  const seen = [], payload = await buildReport(draft(), 'me@example.com');
-  await assert.rejects(sendReport(host(200, JSON.stringify({ success: true, accepted: true,
-    savedToDatabase: true, email_sent: false, duplicate: false }), seen), payload), /המייל לנמען/);
-  const response = await sendReport(host(200, JSON.stringify({ success: true, email_sent: true }), seen), payload);
-  assert.equal(response.email_sent, true);
-  assert.equal(seen[0].args.body, seen[1].args.body);
-});
-
-test('email deduplication is a receipt for an already emailed report', async () => {
-  const response = await sendReport(host(200, '{"success":true,"email_sent":false,"duplicate":true}'), {});
-  assert.equal(response.duplicate, true);
-});
-test('an explicit server failure, 409 and 429 retain the report', async () => {
-  await assert.rejects(sendReport(host(200, '{"success":false}'), {}));
-  await assert.rejects(sendReport(host(409, '{}'), {}), /מזהה/);
-  await assert.rejects(sendReport(host(429, '{}'), {}), /מאוחר/);
+test('a report id conflict is surfaced as 409 so the id can be replaced', async () => {
+  const error = Object.assign(new Error('conflict'), { code: 'error.report_id_conflict' });
+  await assert.rejects(deliverReport(async () => { throw error; }, { payload: {}, submission: {} }), { status: 409 });
 });
 test('canonical validation rejects noninteger values and lone surrogates', () => {
   assert.equal(canonical({ z: 'א', a: 1 }), '{"a":1,"z":"א"}');
