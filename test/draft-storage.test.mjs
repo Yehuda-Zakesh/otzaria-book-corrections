@@ -23,6 +23,19 @@ function session(id = 'one', text = 'פתיחה 😀\nסיום') {
 }
 const workspace = sessions => ({ schemaVersion: 2, sessions, activeSessionId: sessions[0]?.id });
 
+test('reader instances fork drafts without modifying or deleting the other workspace', async () => {
+  const f = fixture();
+  await f.storage.write(workspace([session()]));
+  const originalKeys = [...f.data.keys()];
+  let seq = 0;
+  const reader = createDraftStorage(f.call, () => `reader-${++seq}`, { indexKey: 'reader-session:one', readKey: 'book-session' });
+  const restored = await reader.read(); restored.sessions[0].editedText = 'תיקון חדש';
+  await reader.write(restored);
+  assert.equal((await f.storage.read()).sessions[0].editedText, 'פתיחה 😀\nסיום');
+  for (const key of originalKeys) assert.ok(f.data.has(key), `${key} remains owned by the original workspace`);
+  assert.equal((await createDraftStorage(f.call, () => 'unused', { indexKey: 'reader-session:one' }).read()).sessions[0].editedText, 'תיקון חדש');
+});
+
 test('sparse corrections at opposite ends of a million-character book store a small draft', async () => {
   const originalText = ('פסקה מקורית של הספר עם מילים רבות\n').repeat(32000);
   assert.ok(originalText.length >= 1_000_000);

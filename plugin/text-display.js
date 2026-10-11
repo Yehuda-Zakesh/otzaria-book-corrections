@@ -32,18 +32,60 @@ function displayLowerBound(values, offset, inclusive = false) {
   return low;
 }
 
-export function projectNikud(source, hidden = false) {
+export function projectNikud(source, hidden = false, normalizeWhitespace = false, originalSource = source) {
   const removed = [], boundaries = [], pieces = [];
-  if (hidden) {
-    let start = 0;
-    for (let i = 0; i < source.length; i++) {
-      if (!displayNikud.test(source[i])) continue;
-      pieces.push(source.slice(start, i)); start = i + 1;
-      boundaries.push(i - removed.length); removed.push(i);
+  // Whitespace entered by the user is editable content. Only normalize runs
+  // inherited from the loaded book, otherwise typing a word separator at the
+  // end of a paragraph would immediately hide it.
+  const enteredWhitespace = [];
+  if (normalizeWhitespace && originalSource !== source) {
+    let shift = 0;
+    for (const change of diffBook(originalSource, source, { mergeWords: false })) {
+      if (/[\t\f\r ]/.test(change.proposed)) {
+        enteredWhitespace.push([change.start + shift, change.start + shift + change.proposed.length]);
+      }
+      shift += change.proposed.length - (change.end - change.start);
+    }
+  }
+  if (hidden || normalizeWhitespace) {
+    // Match the reader's HTML whitespace policy without touching the source
+    // used by report hashes and section offsets. Keep paragraph newlines.
+    let lineStart = true, start = 0, enteredIndex = 0;
+    for (let i = 0; i < source.length;) {
+      if (normalizeWhitespace && /[\t\f\r ]/.test(source[i])) {
+        let end = i + 1;
+        while (end < source.length && /[\t\f\r ]/.test(source[end])) end++;
+        while (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][1] <= i) enteredIndex++;
+        if (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][0] < end) {
+          pieces.push(source.slice(start, i));
+          for (let index = i; index < end; index++) {
+            while (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][1] <= index) enteredIndex++;
+            const entered = enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][0] <= index;
+            if (entered) pieces.push(source[index]);
+            else { boundaries.push(index - removed.length); removed.push(index); }
+          }
+          lineStart = false; start = i = end; continue;
+        }
+        const keep = !lineStart && end < source.length && source[end] !== '\n';
+        pieces.push(source.slice(start, i));
+        if (keep) pieces.push(' ');
+        for (let index = i + (keep ? 1 : 0); index < end; index++) {
+          boundaries.push(index - removed.length); removed.push(index);
+        }
+        start = i = end;
+        continue;
+      }
+      if (hidden && displayNikud.test(source[i])) {
+        pieces.push(source.slice(start, i)); start = i + 1;
+        boundaries.push(i - removed.length); removed.push(i);
+      } else {
+        lineStart = source[i] === '\n';
+      }
+      i++;
     }
     pieces.push(source.slice(start));
   }
-  const text = removed.length ? pieces.join('') : source;
+  const text = hidden || normalizeWhitespace ? pieces.join('') : source;
   return {
     source, text,
     toDisplay(offset) {

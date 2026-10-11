@@ -13,7 +13,7 @@
   "permissions": [
     "app.user_email.read", "app.startup_contributions",
     "reader.open", "reader.context_menu", "library.books.read", "library.content.read",
-    "settings.read", "events.subscribe:settings.changed"
+    "settings.read", "events.subscribe:settings.changed", "feedback.send_email"
   ],
   "contributes": {
     "toolTab": { "title": "תיקוני ספרים", "iconName": "document_edit_24_regular", "defaultPinned": false },

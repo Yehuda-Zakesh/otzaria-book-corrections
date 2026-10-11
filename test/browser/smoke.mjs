@@ -54,6 +54,11 @@ else if(method==='library.getTree') data={title:'ספריית אוצריא',path
 else if(method==='reader.openBook') window.mockOpenedBook=args;
 else if(method==='storage.get') data=args.key==='book-session' ? window.mockIndex ?? window.mockStoredSession ?? null : window.mockStorage.get(args.key) ?? null;
 else if(method==='storage.set') { if(window.mockStorageDelay) await new Promise(resolve=>setTimeout(resolve,window.mockStorageDelay)); window.mockStorage.set(args.key,structuredClone(args.value)); if(args.key==='book-session') {window.mockIndex=args.value;window.mockWorkspace=window.mockHydrate(args.value);window.mockStoredSession=window.mockWorkspace.sessions.find(item=>item.id===args.value.activeId);} }
+else if(method==='storage.list') data=[...window.mockStorage.keys()];
+else if(method==='reader.reportTextReaderLocation') {window.mockReaderLocation=args.index;}
+else if(method==='reader.setDefaultTextReader') {window.mockReaderEnabled=args.enabled;}
+else if(method==='reader.setTextReaderFontSize') {window.mockReaderFont=args.fontSize;}
+else if(method==='reader.openBook') {window.mockOpenedBook=args;}
 else if(method==='storage.remove') {window.mockStorage.delete(args.key);if(args.key==='book-session'){window.mockIndex=null;window.mockStoredSession=null;window.mockWorkspace=null;}}
 else if(method==='reader.getSectionTextMap') {
 const sourceText=(args.bookId==='second-book'?window.secondLines:mockLines)[args.sectionIndex];
@@ -403,7 +408,7 @@ for (let i=0;i<5;i++) {
   await new Promise(resolve => setTimeout(resolve, 50));
 }
 const endAfter = await evaluate(`({top:document.getElementById('book-scroll').scrollTop,height:document.getElementById('book-scroll').scrollHeight,section:Number(document.getElementById('section-number').value),rendered:document.getElementById('proposed').value.length})`);
-assert.ok(endAfter.top >= endBefore.top - 1, 'scrolling beyond book end cannot return to the beginning');
+assert.ok(endAfter.height-endAfter.top <= 1000, 'scrolling beyond book end stays on the last page after navigation closes');
 assert.ok(endAfter.section > 1700);
 assert.ok(endAfter.rendered <= 48003);
 const layoutComparison = await evaluate(`(()=>{
@@ -473,6 +478,87 @@ await waitFor(`document.getElementById('status').textContent.includes('מקור 
 assert.equal(await evaluate(`mockReports.length`),0);
 assert.equal(await evaluate(`mockStoredSession.editedText`),persistedState.text,'blocked submission preserves the draft');
 await call('Page.removeScriptToEvaluateOnNewDocument',{identifier:schema3Boot.identifier});
+// The navigation pane occupies its own space and preserves the source position when closing.
+await evaluate(`document.getElementById('proposed').focus()`);
+const mouseTogglePoint = await evaluate(`(()=>{const r=document.getElementById('nav-toggle').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()`);
+assert.ok(await evaluate(`document.getElementById('nav-toggle').getBoundingClientRect().left>=document.getElementById('book-tabs').getBoundingClientRect().right-1`),'navigation button is the leading control on the right, like Otzaria');
+const selectionBeforeToggle = await evaluate(`({start:document.getElementById('proposed').selectionStart,end:document.getElementById('proposed').selectionEnd})`);
+await call('Input.dispatchMouseEvent',{type:'mousePressed',...mouseTogglePoint,button:'left',clickCount:1});
+await call('Input.dispatchMouseEvent',{type:'mouseReleased',...mouseTogglePoint,button:'left',clickCount:1});
+assert.equal(await evaluate(`document.activeElement.id`),'proposed','mouse toggle preserves book focus');
+assert.equal(await evaluate(`document.getElementById('proposed').selectionEnd-document.getElementById('proposed').selectionStart`),selectionBeforeToggle.end-selectionBeforeToggle.start,'mouse toggle preserves selection length');
+await evaluate(`if(document.body.classList.contains('navigation-closed'))document.getElementById('nav-toggle').click()`);
+const paneWidth = await evaluate(`document.getElementById('book-scroll').clientWidth`);
+assert.ok(await evaluate(`document.querySelector('.book-editor').getBoundingClientRect().right<=document.querySelector('.book-navigation').getBoundingClientRect().left+1`), 'pane never covers the text');
+await evaluate(`document.getElementById('book-scroll').dispatchEvent(new WheelEvent('wheel',{deltaY:100}))`);
+assert.equal(await evaluate(`document.body.classList.contains('navigation-closed')`), true);
+assert.ok(await evaluate(`document.getElementById('book-scroll').clientWidth`)>paneWidth, 'text expands when navigation closes');
+await evaluate(`document.getElementById('nav-toggle').click();document.getElementById('nav-pin').click();document.getElementById('book-scroll').dispatchEvent(new WheelEvent('wheel',{deltaY:100}))`);
+assert.equal(await evaluate(`document.body.classList.contains('navigation-closed')`), false, 'pinned navigation stays open');
+await evaluate(`document.getElementById('use-reader').click()`);
+await waitFor(`window.mockReaderEnabled===true`, 'user selects the embedded reader');
+const embeddedBoot = await call('Page.addScriptToEvaluateOnNewDocument', {source:`
+window.mockLines=Array.from({length:600},(_,i)=>'פסקה '+i+' '+('טקסט לקריאה ועריכה ').repeat(10));
+window.Otzaria._booted=false;
+window.mockHandlers['reader.textReaderNavigate']?.({bookId:'mock-book',bookUid:'id:99',currentIndex:500});
+setTimeout(()=>{mockHandlers['reader.textReaderNavigate']({bookId:'mock-book',bookUid:'id:99',currentIndex:500});mockHandlers['plugin.boot']({reader:{embedded:true,nativeToolbar:true,bookId:'mock-book',bookUid:'id:99',currentIndex:300,display:{fontSize:22,profile:{nikud:'show'}}},theme:mockTheme});},100);
+`});
+await call('Page.reload');
+await waitFor(`document.body.classList.contains('embedded-reader') && window.mockReaderLocation===500`, 'embedded boot and navigation queued before boot');
+assert.equal(await evaluate(`getComputedStyle(document.querySelector('.book-navigation')).display`), 'none');
+assert.equal(await evaluate(`document.querySelector('.topbar')`), null);
+assert.ok(await evaluate(`document.querySelector('main').clientHeight >= innerHeight-1`), 'embedded controls consume no reading height');
+assert.equal(await evaluate(`document.getElementById('book-tabs').hidden`), true);
+assert.equal(await evaluate(`getComputedStyle(document.getElementById('proposed')).fontSize`), '22px');
+await evaluate(`mockHandlers['reader.textReaderNavigate']({bookId:'another',bookUid:'id:2',currentIndex:0})`);
+await new Promise(resolve=>setTimeout(resolve,200));
+assert.equal(await evaluate(`window.mockReaderLocation`),500, 'other book events are ignored');
+await evaluate(`mockHandlers['reader.textReaderCommand']({bookId:'mock-book',bookUid:'id:99',action:'display',display:{fontSize:28,profile:{nikud:'show'}}})`);
+await waitFor(`getComputedStyle(document.getElementById('proposed')).fontSize==='28px'`, 'host font changes apply');
+await evaluate(`mockHandlers['reader.textReaderCommand']({bookId:'mock-book',bookUid:'id:99',action:'settings'});`);
+await waitFor(`!document.getElementById('reader-settings').hidden`, 'reader settings command');
+await evaluate(`document.getElementById('font-larger').click()`);
+await waitFor(`window.mockReaderFont===30`, 'font setting reaches host');
+await evaluate(`for(let i=0;i<3;i++){const line=mockLines[i];mockStorage.set('correction-history:fixture-'+i,{id:'fixture-'+i,identity:{bookId:'mock-book',bookUid:'id:99'},title:'ספר בדיקה',sentAt:123,status:'unchecked',submission:{reportId:'fixture-'+i,sectionIndex:i,snapshots:[{index:i,text:line}],sourceStart:0,sourceEnd:line.length,original:line,proposed:'נוסח מתוקן '+i}});}mockLines[0]='נוסח מתוקן 0';mockLines[2]='שינוי אחר';document.getElementById('reader-menu').open=true;document.getElementById('personal-open').click()`);
+await waitFor(`!document.getElementById('personal-area').hidden`, 'personal area opens in embedded reader');
+await waitFor(`document.querySelectorAll('#personal-list .history-card').length>=3 && !document.getElementById('personal-scan').disabled`, 'history finishes loading before scan is enabled');
+await evaluate(`document.getElementById('personal-scan').click()`);
+await waitFor(`!document.getElementById('personal-scan').disabled`, 'scan completes');
+assert.equal(await evaluate(`mockStorage.get('correction-status:fixture-0').status`),'present');
+assert.equal(await evaluate(`mockStorage.get('correction-status:fixture-1').status`),'unchanged');
+assert.equal(await evaluate(`mockStorage.get('correction-status:fixture-2').status`),'changed');
+const historyScreenshot=await call('Page.captureScreenshot',{format:'png'});
+await writeFile(resolve('test/browser/plugin-personal-light.png'),Buffer.from(historyScreenshot.data,'base64'));
+for(let repeat=0;repeat<2;repeat++) {
+  await evaluate(`document.getElementById('personal-back').click();document.getElementById('reader-menu').open=true;document.getElementById('personal-open').click()`);
+  await waitFor(`!document.getElementById('personal-scan').disabled && document.querySelectorAll('#personal-list .history-card').length===3`, 'reopening personal history keeps one row per report');
+  assert.equal(await evaluate(`[...mockStorage.keys()].filter(key=>key.startsWith('correction-history:fixture-')).length`),3);
+  assert.equal(await evaluate(`document.getElementById('personal-list').textContent.includes('הנוסח המוצע נמצא בספרייה')`),true,'scan status survives reopening');
+}
+await evaluate(`document.getElementById('personal-back').click();document.getElementById('native-reader').click()`);
+await waitFor(`window.mockOpenedBook?.reader==='native'`, 'return to native reader saves draft');
+const embeddedSnapshot = await call('Page.captureScreenshot',{format:'png'});
+await writeFile(resolve('test/browser/plugin-embedded-light.png'),Buffer.from(embeddedSnapshot.data,'base64'));
+await evaluate(`mockHandlers['theme.changed']({mode:'dark',colorScheme:{...mockTheme.colorScheme,surface:'#141218',onSurface:'#e6e0e9',surfaceContainerHigh:'#2b2930'}})`);
+const embeddedDarkSnapshot = await call('Page.captureScreenshot',{format:'png'});
+await writeFile(resolve('test/browser/plugin-embedded-dark.png'),Buffer.from(embeddedDarkSnapshot.data,'base64'));
+await call('Page.removeScriptToEvaluateOnNewDocument',{identifier:embeddedBoot.identifier});
+// HTML stripping adds spaces around block tags. Display cleanup must retain
+// source offsets and must also allow typing a space before the next word.
+await call('Page.addScriptToEvaluateOnNewDocument', {source:`window.mockLines=['   טקסט   מקורי  ','  פסקה   שנייה  '];window.mockIndex=null;window.mockWorkspace=null;window.mockDraft=null;window.mockStoredSession=null;window.mockStorage=new Map();`});
+await call('Page.reload');
+await waitFor(`document.getElementById('status')?.textContent===''`, 'whitespace fixture boots');
+await evaluate(`mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'whitespace-book',currentIndex:0}})`);
+await waitFor(`document.getElementById('proposed').value.includes('מקורי') && !document.getElementById('proposed').readOnly`, 'whitespace book opens');
+assert.equal(await evaluate(`!document.getElementById('proposed').dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2}))`), true, 'browser editing menu is prevented');
+assert.equal(await evaluate(`document.getElementById('proposed').value`), 'טקסט מקורי\nפסקה שנייה', 'HTML-created padding is absent from display');
+await evaluate(`const e=document.getElementById('proposed');e.focus();e.setSelectionRange(e.value.length,e.value.length)`);
+await call('Input.insertText', {text:' '});
+assert.equal(await evaluate(`document.getElementById('proposed').value.endsWith(' ')`), true, 'typing a trailing space remains possible');
+await call('Input.insertText', {text:'מילה'});
+assert.equal(await evaluate(`document.getElementById('proposed').value`), 'טקסט מקורי\nפסקה שנייה מילה', 'typing a word after a space preserves separation');
+await waitFor(`window.mockStoredSession?.editedText.endsWith('מילה')`, 'whitespace edit saves');
+assert.equal(await evaluate(`window.mockStoredSession.editedText`), '   טקסט   מקורי  \n  פסקה   שנייה   מילה', 'original padding remains in source while new text is saved');
 assert.equal(errors.length, 0, JSON.stringify(errors));
 console.log(JSON.stringify({ protocol:'file:', boot, homeGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, tabs:{count:2,independentDrafts:true,scrollRestored:true,selectionRestored:true,keyboardFocus:true,reloadRestored:true,closeCancellation:true}, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, exceptions:errors.length }, null, 2));
 ws.close();

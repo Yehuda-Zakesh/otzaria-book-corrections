@@ -118,14 +118,14 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
     while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (markers[mid].y <= y) lo = mid; else hi = mid - 1; }
     return markers[lo]?.offset ?? range.start;
   }
-  function scrollTo(offset, end = offset) {
+  function scrollTo(offset, end = offset, alignment = .25) {
     mount(indexAtOffset(offset));
     editor.focus({ preventScroll: true });
     editor.setSelectionRange(offset - range.start, Math.min(end, range.end) - range.start);
     document.body.append(mirror);
     mirror.textContent = text.slice(range.start, offset);
     const caret = document.createElement('span'); caret.textContent = '\u200b'; mirror.append(caret);
-    viewport.scrollTop = Math.max(0, padding + tops[first] + caret.offsetTop - viewport.clientHeight / 4);
+    viewport.scrollTop = Math.max(0, padding + tops[first] + caret.offsetTop - viewport.clientHeight * alignment);
     mirror.remove(); programmaticTop = viewport.scrollTop;
   }
   viewport.addEventListener('scroll', () => {
@@ -153,6 +153,16 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
   });
   return {
     setText, scrollTo, visibleOffset,
+    reflow(offset, atEnd = false) {
+      const start = range.start + editor.selectionStart, end = range.start + editor.selectionEnd;
+      const focused = document.activeElement;
+      setText(text, offset); scrollTo(offset, offset, 0);
+      if (atEnd) viewport.scrollTop = viewport.scrollHeight;
+      programmaticTop = viewport.scrollTop;
+      editor.setSelectionRange(Math.max(0, Math.min(start - range.start, editor.value.length)), Math.max(0, Math.min(end - range.start, editor.value.length)));
+      if (focused !== editor) focused?.focus({ preventScroll: true });
+      onPosition(visibleOffset());
+    },
     get geometry() { return { width, lineHeight, length: text.length, heights: [...heights] }; },
     get range() { return range; },
     edited(value) {

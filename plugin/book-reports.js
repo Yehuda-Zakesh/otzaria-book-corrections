@@ -46,6 +46,36 @@ function sourcePieces(book, change) {
   }
   return chunks;
 }
+// The existing host SDK resolves HTML selections by unique literal raw text.
+// Widen repeated selections with unchanged context, never by guessing a match.
+export function hostCorrectionRange(raw, plain, start, end, proposed, { minStart = 0, maxEnd = plain.length } = {}) {
+  const boundary = offset => !(offset > 0 && offset < plain.length &&
+    /[\uD800-\uDBFF]/.test(plain[offset - 1]) && /[\uDC00-\uDFFF]/.test(plain[offset]));
+  if (!boundary(start) || !boundary(end)) return null;
+  function candidate(a, b) {
+    if (!boundary(a) || !boundary(b)) return null;
+    const original = plain.slice(a, b), replacement = plain.slice(a, start) + proposed + plain.slice(end, b);
+    const correction = correctionForSource(raw, plain, a, b, replacement);
+    if (!correction) return null;
+    if (raw !== plain) {
+      const offset = correction.selection_offset;
+      if (!original || !offset || raw.indexOf(original) !== offset.start || raw.lastIndexOf(original) !== offset.start ||
+          raw.slice(offset.start, offset.end) !== original || correction.proposed_text !== replacement) return null;
+    }
+    return { start: a, end: b, original, proposed: replacement, correction };
+  }
+  const exact = candidate(start, end);
+  if (exact || raw === plain) return exact;
+  // Only the repeated literal selection limitation can be repaired by context.
+  const original = plain.slice(start, end);
+  if (!correctionForSource(raw, plain, start, end, proposed) || !original ||
+      raw.indexOf(original) < 0 || raw.indexOf(original) === raw.lastIndexOf(original)) return null;
+  for (let context = 1; context <= 128; context++) {
+    const expanded = candidate(Math.max(minStart, start - context), Math.min(maxEnd, end + context));
+    if (expanded) return expanded;
+  }
+  return null;
+}
 export async function prepareReports(session, changes, email, call, idFactory, onProgress = () => {}, { sourceBook, client } = {}) {
   const maps = new Map(), queue = [];
   const sourceBookId = officialReportBookId(sourceBook);
@@ -71,13 +101,25 @@ export async function prepareReports(session, changes, email, call, idFactory, o
     return maps.get(section.index);
   }
   for (let i = 0; i < reportChanges.length; i++) {
-    const change = reportChanges[i], first = sectionAt(session.book.sections, change.start);
+    let change = reportChanges[i];
+    const first = sectionAt(session.book.sections, change.start);
     const last = sectionAt(session.book.sections, Math.max(change.start, change.end - 1));
     for (let index = first.index; index <= last.index; index++) await checked(session.book.sections[index]);
     const firstMap = await checked(first), raw = sourceBook?.rawLines?.[first.index];
-    const correction = sourceBookId != null && first.index === last.index && !change.proposed.includes('\n') &&
+    // Context must stay clear of other edits, including insertion positions.
+    let minStart = 0, maxEnd = first.text.length;
+    for (let otherIndex = 0; otherIndex < reportChanges.length; otherIndex++) {
+      if (otherIndex === i) continue;
+      const other = reportChanges[otherIndex];
+      if (other.end <= change.start) minStart = Math.max(minStart, other.end - first.start);
+      if (other.start >= change.end) maxEnd = Math.min(maxEnd, other.start - first.start);
+    }
+    const compatible = sourceBookId != null && first.index === last.index && !change.proposed.includes('\n') &&
       typeof raw === 'string' && sourceText(raw) === firstMap.sourceText ?
-      correctionForSource(raw, first.text, change.start - first.start, change.end - first.start, change.proposed) : null;
+      hostCorrectionRange(raw, first.text, change.start - first.start, change.end - first.start, change.proposed, { minStart, maxEnd }) : null;
+    const correction = compatible?.correction ?? null;
+    if (compatible) change = { ...change, start: first.start + compatible.start, end: first.start + compatible.end,
+      original: compatible.original, proposed: compatible.proposed };
     // A valid single-line correction can use the full 20,000-unit v2 limit.
     // Chunk only the proposals that cannot be represented as one correction.
     const before = correction ? [change.original] : sourcePieces(session.book, change);

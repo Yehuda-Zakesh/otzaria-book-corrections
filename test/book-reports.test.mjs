@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareReports } from '../plugin/book-reports.js';
+import { prepareReports, hostCorrectionRange } from '../plugin/book-reports.js';
+import { sourceText } from '../plugin/book.js';
+globalThis.DOMParser = class {
+  parseFromString(input) {
+    const entities = { amp: '&', lt: '<', gt: '>' };
+    return { body: { textContent: entities[input.slice(7, -8)] } };
+  }
+};
 
 function fixture(lines, overrides = {}) {
   let position = 0, nextId = 0;
@@ -137,6 +144,66 @@ function verifiedSource(f, rawLines = f.session.book.sections.map(section => sec
 const structuredPrepare = (f, changes, sourceBook = verifiedSource(f)) =>
   prepareReports(f.session, changes, 'reader@example.com', f.call, f.id, undefined, { sourceBook,
     client: { app_version: '0.9.98+801', platform: 'windows' } });
+
+test('repeated HTML selection gains unique context accepted by the existing host SDK', async () => {
+  const raw = '<b>one bad two bad three bad four</b>', plain = sourceText(raw);
+  const start = plain.indexOf('bad', plain.indexOf('bad') + 1), end = start + 3;
+  const f = fixture([plain]);
+  const [item] = await structuredPrepare(f, [{ start, end, original: 'bad', proposed: 'good' }], verifiedSource(f, [raw]));
+  const s = item.submission, offset = item.payload.correction.selection_offset;
+  assert.equal(s.forceFreeText, false);
+  assert.ok(s.original.length > 3);
+  assert.equal(raw.indexOf(s.original), raw.lastIndexOf(s.original), 'host requires a unique raw occurrence');
+  assert.equal(raw.indexOf(s.original), offset.start);
+  assert.equal(raw.slice(offset.start, offset.end), s.original);
+  assert.equal(plain.slice(s.sourceStart, s.sourceEnd), s.original);
+  assert.equal(plain.slice(0, s.sourceStart) + s.proposed + plain.slice(s.sourceEnd), plain.slice(0, start) + 'good' + plain.slice(end));
+  assert.equal(item.payload.correction.proposed_text, s.proposed);
+});
+
+test('plain repeated words keep exact offsets; HTML context never cuts emoji or crosses tags', () => {
+  const plain = 'bad bad';
+  const exact = hostCorrectionRange(plain, plain, 4, 7, 'good');
+  assert.equal(exact.start, 4); assert.equal(exact.original, 'bad');
+  const raw = '<b>😀badA 😀badB</b>', text = sourceText(raw), start = text.lastIndexOf('bad');
+  const expanded = hostCorrectionRange(raw, text, start, start + 3, 'good');
+  assert.ok(expanded);
+  assert.doesNotMatch(expanded.original, /^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u);
+  assert.equal(hostCorrectionRange('<b>bad</b><i>bad</i>', 'badbad', 3, 6, 'good'), null);
+  assert.equal(hostCorrectionRange('<b>a&amp;b</b>', 'a&b', 1, 2, 'and'), null);
+  assert.equal(hostCorrectionRange('<b>bad</b>', 'bad', 0, 3, '<good>'), null);
+  assert.equal(hostCorrectionRange('<b>bad</b>', 'bad', 1, 1, 'new'), null);
+  assert.equal(hostCorrectionRange('😀bad', '😀bad', 1, 2, 'x'), null);
+});
+
+test('bounded context cannot certify deeply repeated HTML and remains a free-text proposal', async () => {
+  const plain = 'a'.repeat(600), raw = `<b>${plain}</b>`, f = fixture([plain]);
+  const [item] = await structuredPrepare(f, [{ start: 300, end: 301, original: 'a', proposed: 'b' }], verifiedSource(f, [raw]));
+  assert.equal(item.submission.forceFreeText, true);
+  assert.equal(item.payload.report_kind, 'free_text');
+  assert.equal(item.submission.sourceStart, 300);
+  assert.equal(item.submission.original, 'a');
+});
+
+test('expanded HTML context stays outside neighboring edits and insertion positions', async () => {
+  const plain = 'bad bad bad bad bad', raw = `<b>${plain}</b>`, f = fixture([plain]);
+  const changes = [0, 4, 8].map(start => ({ start, end: start + 3, original: 'bad', proposed: 'good' }));
+  const queue = await structuredPrepare(f, changes, verifiedSource(f, [raw]));
+  assert.equal(queue[1].submission.forceFreeText, true, 'unique context would cross an independent edit');
+  assert.equal(queue[1].submission.sourceStart, 4);
+  assert.equal(queue[1].submission.sourceEnd, 7);
+  for (let index = 0; index < queue.length; index++) {
+    if (queue[index].submission.forceFreeText) continue;
+    const { sourceStart, sourceEnd } = queue[index].submission;
+    for (let other = 0; other < changes.length; other++) if (other !== index) {
+      assert.ok(sourceEnd <= changes[other].start || sourceStart >= changes[other].end);
+    }
+  }
+  const insertionBounds = hostCorrectionRange(raw, plain, 4, 7, 'good', { minStart: 4, maxEnd: 7 });
+  assert.equal(insertionBounds, null, 'context cannot cross adjacent insertion positions');
+  const exactPlain = hostCorrectionRange(plain, plain, 4, 7, 'good', { minStart: 4, maxEnd: 7 });
+  assert.equal(exactPlain.start, 4, 'plain exact ranges remain unchanged');
+});
 
 test('verified raw lines produce v2 selection, deletion and whole-line insertion on SDK 0.9.98', async () => {
   const f = fixture(['אָב 😀 אָב']);

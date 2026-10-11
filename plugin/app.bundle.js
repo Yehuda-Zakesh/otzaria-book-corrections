@@ -496,18 +496,60 @@ function displayLowerBound(values, offset, inclusive = false) {
   return low;
 }
 
-function projectNikud(source, hidden = false) {
+function projectNikud(source, hidden = false, normalizeWhitespace = false, originalSource = source) {
   const removed = [], boundaries = [], pieces = [];
-  if (hidden) {
-    let start = 0;
-    for (let i = 0; i < source.length; i++) {
-      if (!displayNikud.test(source[i])) continue;
-      pieces.push(source.slice(start, i)); start = i + 1;
-      boundaries.push(i - removed.length); removed.push(i);
+  // Whitespace entered by the user is editable content. Only normalize runs
+  // inherited from the loaded book, otherwise typing a word separator at the
+  // end of a paragraph would immediately hide it.
+  const enteredWhitespace = [];
+  if (normalizeWhitespace && originalSource !== source) {
+    let shift = 0;
+    for (const change of diffBook(originalSource, source, { mergeWords: false })) {
+      if (/[\t\f\r ]/.test(change.proposed)) {
+        enteredWhitespace.push([change.start + shift, change.start + shift + change.proposed.length]);
+      }
+      shift += change.proposed.length - (change.end - change.start);
+    }
+  }
+  if (hidden || normalizeWhitespace) {
+    // Match the reader's HTML whitespace policy without touching the source
+    // used by report hashes and section offsets. Keep paragraph newlines.
+    let lineStart = true, start = 0, enteredIndex = 0;
+    for (let i = 0; i < source.length;) {
+      if (normalizeWhitespace && /[\t\f\r ]/.test(source[i])) {
+        let end = i + 1;
+        while (end < source.length && /[\t\f\r ]/.test(source[end])) end++;
+        while (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][1] <= i) enteredIndex++;
+        if (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][0] < end) {
+          pieces.push(source.slice(start, i));
+          for (let index = i; index < end; index++) {
+            while (enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][1] <= index) enteredIndex++;
+            const entered = enteredIndex < enteredWhitespace.length && enteredWhitespace[enteredIndex][0] <= index;
+            if (entered) pieces.push(source[index]);
+            else { boundaries.push(index - removed.length); removed.push(index); }
+          }
+          lineStart = false; start = i = end; continue;
+        }
+        const keep = !lineStart && end < source.length && source[end] !== '\n';
+        pieces.push(source.slice(start, i));
+        if (keep) pieces.push(' ');
+        for (let index = i + (keep ? 1 : 0); index < end; index++) {
+          boundaries.push(index - removed.length); removed.push(index);
+        }
+        start = i = end;
+        continue;
+      }
+      if (hidden && displayNikud.test(source[i])) {
+        pieces.push(source.slice(start, i)); start = i + 1;
+        boundaries.push(i - removed.length); removed.push(i);
+      } else {
+        lineStart = source[i] === '\n';
+      }
+      i++;
     }
     pieces.push(source.slice(start));
   }
-  const text = removed.length ? pieces.join('') : source;
+  const text = hidden || normalizeWhitespace ? pieces.join('') : source;
   return {
     source, text,
     toDisplay(offset) {
@@ -582,6 +624,36 @@ function sourcePieces(book, change) {
   }
   return chunks;
 }
+// The existing host SDK resolves HTML selections by unique literal raw text.
+// Widen repeated selections with unchanged context, never by guessing a match.
+function hostCorrectionRange(raw, plain, start, end, proposed, { minStart = 0, maxEnd = plain.length } = {}) {
+  const boundary = offset => !(offset > 0 && offset < plain.length &&
+    /[\uD800-\uDBFF]/.test(plain[offset - 1]) && /[\uDC00-\uDFFF]/.test(plain[offset]));
+  if (!boundary(start) || !boundary(end)) return null;
+  function candidate(a, b) {
+    if (!boundary(a) || !boundary(b)) return null;
+    const original = plain.slice(a, b), replacement = plain.slice(a, start) + proposed + plain.slice(end, b);
+    const correction = correctionForSource(raw, plain, a, b, replacement);
+    if (!correction) return null;
+    if (raw !== plain) {
+      const offset = correction.selection_offset;
+      if (!original || !offset || raw.indexOf(original) !== offset.start || raw.lastIndexOf(original) !== offset.start ||
+          raw.slice(offset.start, offset.end) !== original || correction.proposed_text !== replacement) return null;
+    }
+    return { start: a, end: b, original, proposed: replacement, correction };
+  }
+  const exact = candidate(start, end);
+  if (exact || raw === plain) return exact;
+  // Only the repeated literal selection limitation can be repaired by context.
+  const original = plain.slice(start, end);
+  if (!correctionForSource(raw, plain, start, end, proposed) || !original ||
+      raw.indexOf(original) < 0 || raw.indexOf(original) === raw.lastIndexOf(original)) return null;
+  for (let context = 1; context <= 128; context++) {
+    const expanded = candidate(Math.max(minStart, start - context), Math.min(maxEnd, end + context));
+    if (expanded) return expanded;
+  }
+  return null;
+}
 async function prepareReports(session, changes, email, call, idFactory, onProgress = () => {}, { sourceBook, client } = {}) {
   const maps = new Map(), queue = [];
   const sourceBookId = officialReportBookId(sourceBook);
@@ -607,13 +679,25 @@ async function prepareReports(session, changes, email, call, idFactory, onProgre
     return maps.get(section.index);
   }
   for (let i = 0; i < reportChanges.length; i++) {
-    const change = reportChanges[i], first = sectionAt(session.book.sections, change.start);
+    let change = reportChanges[i];
+    const first = sectionAt(session.book.sections, change.start);
     const last = sectionAt(session.book.sections, Math.max(change.start, change.end - 1));
     for (let index = first.index; index <= last.index; index++) await checked(session.book.sections[index]);
     const firstMap = await checked(first), raw = sourceBook?.rawLines?.[first.index];
-    const correction = sourceBookId != null && first.index === last.index && !change.proposed.includes('\n') &&
+    // Context must stay clear of other edits, including insertion positions.
+    let minStart = 0, maxEnd = first.text.length;
+    for (let otherIndex = 0; otherIndex < reportChanges.length; otherIndex++) {
+      if (otherIndex === i) continue;
+      const other = reportChanges[otherIndex];
+      if (other.end <= change.start) minStart = Math.max(minStart, other.end - first.start);
+      if (other.start >= change.end) maxEnd = Math.min(maxEnd, other.start - first.start);
+    }
+    const compatible = sourceBookId != null && first.index === last.index && !change.proposed.includes('\n') &&
       typeof raw === 'string' && sourceText(raw) === firstMap.sourceText ?
-      correctionForSource(raw, first.text, change.start - first.start, change.end - first.start, change.proposed) : null;
+      hostCorrectionRange(raw, first.text, change.start - first.start, change.end - first.start, change.proposed, { minStart, maxEnd }) : null;
+    const correction = compatible?.correction ?? null;
+    if (compatible) change = { ...change, start: first.start + compatible.start, end: first.start + compatible.end,
+      original: compatible.original, proposed: compatible.proposed };
     // A valid single-line correction can use the full 20,000-unit v2 limit.
     // Chunk only the proposals that cannot be represented as one correction.
     const before = correction ? [change.original] : sourcePieces(session.book, change);
@@ -1100,14 +1184,14 @@ function createContinuousEditor(viewport, canvas, editor, onPosition) {
     while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (markers[mid].y <= y) lo = mid; else hi = mid - 1; }
     return markers[lo]?.offset ?? range.start;
   }
-  function scrollTo(offset, end = offset) {
+  function scrollTo(offset, end = offset, alignment = .25) {
     mount(indexAtOffset(offset));
     editor.focus({ preventScroll: true });
     editor.setSelectionRange(offset - range.start, Math.min(end, range.end) - range.start);
     document.body.append(mirror);
     mirror.textContent = text.slice(range.start, offset);
     const caret = document.createElement('span'); caret.textContent = '\u200b'; mirror.append(caret);
-    viewport.scrollTop = Math.max(0, padding + tops[first] + caret.offsetTop - viewport.clientHeight / 4);
+    viewport.scrollTop = Math.max(0, padding + tops[first] + caret.offsetTop - viewport.clientHeight * alignment);
     mirror.remove(); programmaticTop = viewport.scrollTop;
   }
   viewport.addEventListener('scroll', () => {
@@ -1135,6 +1219,16 @@ function createContinuousEditor(viewport, canvas, editor, onPosition) {
   });
   return {
     setText, scrollTo, visibleOffset,
+    reflow(offset, atEnd = false) {
+      const start = range.start + editor.selectionStart, end = range.start + editor.selectionEnd;
+      const focused = document.activeElement;
+      setText(text, offset); scrollTo(offset, offset, 0);
+      if (atEnd) viewport.scrollTop = viewport.scrollHeight;
+      programmaticTop = viewport.scrollTop;
+      editor.setSelectionRange(Math.max(0, Math.min(start - range.start, editor.value.length)), Math.max(0, Math.min(end - range.start, editor.value.length)));
+      if (focused !== editor) focused?.focus({ preventScroll: true });
+      onPosition(visibleOffset());
+    },
     get geometry() { return { width, lineHeight, length: text.length, heights: [...heights] }; },
     get range() { return range; },
     edited(value) {
@@ -1211,7 +1305,7 @@ function decodeStoredDraft(book, draft) {
   return { ...state, book: restoredBook, editedText: restorePatch(book.originalText, editedPatch),
     ...(reportedPatch ? { reportedText: restorePatch(book.originalText, reportedPatch) } : {}) };
 }
-function createDraftStorage(call, idFactory) {
+function createDraftStorage(call, idFactory, { indexKey = 'book-session', readKey = indexKey } = {}) {
   let committed = new Map();
   const patches = new Map(), garbage = new Set();
   function patchFor(id, kind, source, text) {
@@ -1220,7 +1314,7 @@ function createDraftStorage(call, idFactory) {
     const patch = textPatch(source, text); patches.set(key, { source, text, patch }); return patch;
   }
   async function read() {
-    const index = await call('storage.get', { key: 'book-session' });
+    const index = await call('storage.get', { key: readKey });
     if (index?.schemaVersion !== 3) return index;
     const sessions = [], restored = new Map();
     for (const ref of index.sessions) {
@@ -1230,7 +1324,8 @@ function createDraftStorage(call, idFactory) {
       const item = decodeStoredDraft(book, draft);
       sessions.push(item); restored.set(ref.id, { ...ref, serialized: JSON.stringify(draft), book: item.book });
     }
-    committed = restored;
+    // A new reader instance forks a saved draft; it never deletes another instance's files.
+    committed = readKey === indexKey ? restored : new Map();
     return { ...index, schemaVersion: 2, sessions };
   }
   async function write(snapshot) {
@@ -1253,9 +1348,9 @@ function createDraftStorage(call, idFactory) {
       }
       next.set(item.id, { id: item.id, bookKey, draftKey, serialized, book });
     }
-    if (snapshot) await call('storage.set', { key: 'book-session', value: { ...snapshot, schemaVersion: 3,
+    if (snapshot) await call('storage.set', { key: indexKey, value: { ...snapshot, ...(indexKey !== 'book-session' ? { updatedAt: Date.now() } : {}), schemaVersion: 3,
       sessions: [...next.values()].map(({ id, bookKey, draftKey }) => ({ id, bookKey, draftKey })) } });
-    else await call('storage.remove', { key: 'book-session' });
+    else await call('storage.remove', { key: indexKey });
     for (const ref of committed.values()) { garbage.add(ref.bookKey); garbage.add(ref.draftKey); }
     committed = next;
     for (const ref of next.values()) { garbage.delete(ref.bookKey); garbage.delete(ref.draftKey); }
@@ -1311,9 +1406,82 @@ function createSourceGuard(call) {
   return { check, restore };
 }
 
+const prefix = 'correction-history:';
+const statusPrefix = 'correction-status:';
+const historyStatus = {
+  unchecked: 'טרם נבדק', present: 'הנוסח המוצע נמצא בספרייה', unchanged: 'המקור עדיין ללא התיקון',
+  changed: 'המקור השתנה — נדרשת בדיקה', unavailable: 'לא ניתן לבדוק כעת'
+};
+function historyRecord(book, item) {
+  return { id: item.submission.reportId, identity: book.identity, title: book.details.title ?? book.identity.bookId,
+    location: item.payload.current_ref, sentAt: item.sentAt ?? Date.now(), submission: item.submission,
+    status: 'unchecked', correctionSupported: item.correctionSupported === true };
+}
+function classifyCorrection(record, lines) {
+  const s = record?.submission, snapshots = s?.snapshots;
+  if (!Array.isArray(snapshots) || !snapshots.length) return 'changed';
+  if (!Array.isArray(lines) || snapshots.some(snapshot => !Number.isInteger(snapshot?.index) || snapshot.index < 0 || typeof snapshot.text !== 'string')) return 'changed';
+  const current = snapshots.map(({ index }) => lines[index]);
+  if (current.some(line => typeof line !== 'string')) return 'changed';
+  if (current.every((line, i) => line === snapshots[i].text)) return 'unchanged';
+  if (snapshots.length !== 1 || !Number.isInteger(s.sourceStart) || !Number.isInteger(s.sourceEnd)) return 'changed';
+  const before = snapshots[0].text;
+  if (s.sourceStart < 0 || s.sourceEnd < s.sourceStart || s.sourceEnd > before.length || typeof s.original !== 'string' || typeof s.proposed !== 'string') return 'changed';
+  if (before.slice(s.sourceStart, s.sourceEnd) !== s.original) return 'changed';
+  const expected = before.slice(0, s.sourceStart) + s.proposed + before.slice(s.sourceEnd);
+  if (current[0] === expected) return 'present';
+  if (before.length > 50000 || current[0].length > 50000) return 'changed';
+  // Independent corrections in the same paragraph may already be present together.
+  const exact = diffBook(before, current[0]).some(change => change.start === s.sourceStart && change.end === s.sourceEnd && change.proposed === s.proposed);
+  return exact ? 'present' : 'changed';
+}
+function createPersonalHistory(call) {
+  // Keep scan results separate from immutable report archives: another reader
+  // WebView can finish archiving after this view has already scanned the report.
+  const pending = new Map();
+  function update(key, operation) {
+    const next = (pending.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
+    pending.set(key, next);
+    return next.finally(() => { if (pending.get(key) === next) pending.delete(key); });
+  }
+  return {
+    async save(book, item) {
+      const key = prefix + item.submission.reportId;
+      return update(key, async () => {
+        if (!await call('storage.get', { key })) await call('storage.set', { key, value: historyRecord(book, item) });
+      });
+    },
+    async list() {
+      const keys = await call('storage.list');
+      const result = [];
+      for (const key of keys ?? []) if (key.startsWith(prefix)) {
+        const item = await call('storage.get', { key });
+        if (item?.submission && item.identity && typeof item.id === 'string' && (typeof item.identity.bookUid === 'string' || typeof item.identity.bookId === 'string')) {
+          const state = await call('storage.get', { key: statusPrefix + item.id });
+          result.push(state && Object.hasOwn(historyStatus, state.status) && Number.isFinite(state.checkedAt)
+            ? { ...item, status: state.status, checkedAt: state.checkedAt } : item);
+        }
+      }
+      return result.sort((a, b) => b.sentAt - a.sentAt);
+    },
+    async check(record, lines) {
+      const next = { ...record, status: classifyCorrection(record, lines), checkedAt: Date.now() };
+      const key = statusPrefix + record.id;
+      await update(key, () => call('storage.set', { key, value: { status: next.status, checkedAt: next.checkedAt } }));
+      return next;
+    },
+    async checkUnavailable(record) {
+      const next = { ...record, status: 'unavailable', checkedAt: Date.now() };
+      const key = statusPrefix + record.id;
+      await update(key, () => call('storage.set', { key, value: { status: next.status, checkedAt: next.checkedAt } }));
+      return next;
+    }
+  };
+}
+
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
-let session = null, initialized, loading = false, sending = false, pause = false;
+let session = null, initialized, startInitialization, loading = false, sending = false, pause = false;
 let sessions = [];
 let chooserOpen = false;
 let libraryTabs = [], activeLibraryId = null;
@@ -1331,8 +1499,168 @@ let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
-const draftStorage = createDraftStorage(call, newId), sourceGuard = createSourceGuard(call);
+let draftStorage = createDraftStorage(call, newId);
+const sourceGuard = createSourceGuard(call), personalHistory = createPersonalHistory(call);
+let embeddedReader = null, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
+let locationTimer, lastReportedIndex = null, navigationOpen = true, navigationPinned = false;
 const searchBook = createAsyncBookSearch();
+function applyReaderDisplay(display) {
+  if (!display) return;
+  if (Number.isFinite(display.fontSize)) document.documentElement.style.setProperty('--font-size', `${display.fontSize}px`);
+  if (session && typeof display.profile?.nikud === 'string') {
+    session.hideNikud = display.profile.nikud === 'hide';
+    if (session.view) { delete session.view.geometry; delete session.view.scrollTop; }
+  }
+}
+function queueReaderEvent(event, command = false) {
+  openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted; await initialized;
+    if (!embeddedReader || event.bookUid && event.bookUid !== embeddedReader.bookUid || event.bookId && event.bookId !== embeddedReader.bookId) return;
+    if (command && event.action === 'advance') {
+      el('book-scroll').scrollTop += (event.direction === -1 ? -1 : 1) * el('book-scroll').clientHeight * .85;
+    } else if (command && event.action === 'settings') {
+      el('reader-settings').hidden = !el('reader-settings').hidden;
+      el('reader-menu').open = !el('reader-settings').hidden;
+      if (!el('reader-settings').hidden) el('font-larger').focus();
+    } else {
+      captureView(); embeddedReader = { ...embeddedReader, ...event };
+      applyReaderDisplay(event.display); render();
+      if (!command) navigateTo(readerPosition(event)); else restoreView();
+      if (!command && event.searchQuery) {
+        el('book-search').value = event.searchQuery;
+        await renderSearchResults();
+      }
+    }
+  }).catch(error => message(error.message, true));
+}
+function setNavigation(open) {
+  if (open === navigationOpen) return;
+  const offset = continuousEditor?.visibleOffset();
+  const viewport = el('book-scroll');
+  const atEnd = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+  navigationOpen = open;
+  document.body?.classList.toggle('navigation-closed', !open);
+  el('nav-toggle').setAttribute('aria-expanded', String(open));
+  if (continuousEditor && Number.isFinite(offset)) continuousEditor.reflow(offset, atEnd);
+}
+el('nav-toggle').addEventListener('click', () => setNavigation(!navigationOpen));
+for (const id of ['nav-toggle', 'nav-pin']) el(id).addEventListener('pointerdown', event => {
+  // Mouse toggles preserve the reader caret; keyboard traversal still reaches the controls.
+  if (event.button === 0 && document.activeElement === el('proposed')) event.preventDefault();
+});
+el('nav-pin').addEventListener('click', () => {
+  navigationPinned = !navigationPinned;
+  document.body?.classList.toggle('navigation-pinned', navigationPinned);
+  el('nav-pin').setAttribute('aria-pressed', String(navigationPinned));
+  el('nav-pin').textContent = navigationPinned ? 'בטל נעיצה' : 'נעץ ניווט';
+});
+el('reader-menu').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); el('reader-menu').open = false; el('proposed').focus({ preventScroll: true }); }
+});
+el('book-scroll').addEventListener('wheel', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); }, { passive: true });
+el('book-scroll').addEventListener('touchmove', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); }, { passive: true });
+el('book-scroll').addEventListener('pointerdown', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); });
+el('proposed').addEventListener('keydown', event => {
+  if (!embeddedReader && !navigationPinned && ['PageDown', 'PageUp'].includes(event.key)) setNavigation(false);
+});
+el('use-reader').addEventListener('click', async () => {
+  try {
+    await call('reader.setDefaultTextReader', { enabled: true });
+    if (session) await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0 });
+    message('התוסף נבחר כקורא הטקסט באוצריא.', false, 3000);
+  } catch (error) { message(error.message, true); }
+});
+el('native-reader').addEventListener('click', async () => {
+  try { await persist(); await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0, reader: 'native' }); }
+  catch (error) { message(error.message, true); }
+});
+for (const [id, delta] of [['font-smaller', -2], ['font-larger', 2]]) el(id).addEventListener('click', async () => {
+  const size = Number.parseFloat(getComputedStyle(el('proposed')).fontSize);
+  try { await call('reader.setTextReaderFontSize', { fontSize: Math.max(14, Math.min(60, size + delta)) }); }
+  catch (error) { message(error.message, true); }
+});
+function renderHistory() {
+  const drafts = savedReaderDrafts.map(({ key, title, updatedAt }) => {
+    const row = document.createElement('article'); row.className = 'history-card';
+    const label = document.createElement('strong'); label.textContent = `${title} — טיוטה`;
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'ghost'; button.textContent = 'פתח טיוטה';
+    button.addEventListener('click', async () => {
+      if (loading || sending) return;
+      try {
+        const saved = await createDraftStorage(call, newId, { indexKey: `draft-preview:${newId()}`, readKey: key }).read();
+        const item = saved?.sessions?.[0];
+        if (!item) throw new Error('הטיוטה אינה זמינה.');
+        if (embeddedReader && item.book.identity.bookUid !== embeddedReader.bookUid) {
+          await call('reader.openBook', { ...item.book.identity, index: item.location?.sectionIndex ?? 0 }); return;
+        }
+        if (session) await persist();
+        const next = { ...item, id: newId() };
+        await persist(next, embeddedReader ? [next] : sessions); if (embeddedReader) sessions = [next];
+        session = next; personalOpen = false; chooserOpen = false; render(); restoreView(); scheduleSave();
+      } catch (error) { message(error.message, true); }
+    });
+    const date = document.createElement('small'); date.textContent = new Date(updatedAt).toLocaleDateString('he-IL');
+    row.append(label, date, button); return row;
+  });
+  const rows = historyItems.map(item => {
+    const row = document.createElement('article'); row.className = 'history-card';
+    const title = document.createElement('strong'); title.textContent = `${item.title} — ${item.location ?? `פסקה ${item.submission.sectionIndex + 1}`}`;
+    const state = document.createElement('p'); state.textContent = historyStatus[item.status] ?? historyStatus.unchecked;
+    const original = document.createElement('p'); original.textContent = `מקור: ${item.submission.original}`;
+    const proposed = document.createElement('p'); proposed.textContent = `מוצע: ${item.submission.proposed || '(מחיקה)'}`;
+    const date = document.createElement('small'); date.textContent = `נשלח: ${new Date(item.sentAt).toLocaleDateString('he-IL')}${item.checkedAt ? ` · נבדק: ${new Date(item.checkedAt).toLocaleDateString('he-IL')}` : ''}`;
+    row.append(title, state, original, proposed, date); return row;
+  });
+  if (!rows.length) { const empty = document.createElement('p'); empty.textContent = 'אין עדיין תיקונים שנשלחו.'; rows.push(empty); }
+  el('personal-list').replaceChildren(...drafts, ...rows);
+}
+el('personal-open').addEventListener('click', async () => {
+  if (loading || sending || scanning) return;
+  captureView(); el('reader-menu').open = false; personalOpen = true; render();
+  el('personal-scan').disabled = true;
+  historyItems = []; savedReaderDrafts = []; renderHistory();
+  try {
+    for (const item of sessions) for (const report of item.queue ?? []) if (report.sent && report.submission) await personalHistory.save(item.book, report);
+    historyItems = await personalHistory.list(); renderHistory(); el('personal-scan').focus();
+    const keys = await call('storage.list'); savedReaderDrafts = [];
+    for (const key of keys ?? []) if (key.startsWith('reader-session:')) {
+      const index = await call('storage.get', { key }), ref = index?.sessions?.[0];
+      if (!ref) continue;
+      const book = await call('storage.get', { key: ref.bookKey });
+      const draft = await call('storage.get', { key: ref.draftKey });
+      if (draft?.editedPatch?.length || draft?.queue?.some(item => !item.sent)) savedReaderDrafts.push({ key, title: book?.details?.title ?? book?.identity?.bookId ?? 'ספר', updatedAt: index.updatedAt });
+    }
+    savedReaderDrafts.sort((a, b) => b.updatedAt - a.updatedAt); renderHistory();
+  } catch (error) { message(error.message, true); }
+  finally { if (!scanning) el('personal-scan').disabled = false; }
+});
+el('personal-back').addEventListener('click', () => { personalOpen = false; render(); restoreView(); });
+el('personal-scan').addEventListener('click', async () => {
+  if (scanning) return;
+  scanning = true; el('personal-scan').disabled = true;
+  const groups = new Map();
+  for (let i = 0; i < historyItems.length; i++) {
+    const item = historyItems[i], key = item.identity.bookUid ?? item.identity.bookId;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  }
+  let completed = 0;
+  try {
+    for (const indices of groups.values()) {
+      let lines;
+      try { lines = (await loadBook(call, historyItems[indices[0]].identity)).sections.map(section => section.text); }
+      catch { /* Mark this book unavailable without retaining other complete books. */ }
+      for (const i of indices) {
+        const item = historyItems[i];
+        message(`בודק תיקון ${++completed} מתוך ${historyItems.length}…`);
+        historyItems[i] = lines ? await personalHistory.check(item, lines) : await personalHistory.checkUnavailable(item);
+        renderHistory(); await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+    message('הבדיקה מול הספרייה המקומית הסתיימה.', false, 3000);
+  } catch (error) { message(error.message, true); }
+  finally { scanning = false; el('personal-scan').disabled = false; }
+});
 function message(text = '', error = false, duration = 0) {
   clearTimeout(statusTimer);
   statusText = text;
@@ -1384,8 +1712,12 @@ function controls() {
   const locked = loading || sending;
   el('proposed').setAttribute('aria-describedby', 'status');
   el('proposed').readOnly = locked || !!hasPartialDelivery();
-  el('send').hidden = !session || chooserOpen;
-  el('change-book').hidden = false;
+  el('send').hidden = !session || chooserOpen || personalOpen;
+  el('change-book').hidden = !!embeddedReader || personalOpen;
+  el('use-reader').hidden = !!embeddedReader;
+  el('native-reader').hidden = !embeddedReader;
+  el('nav-toggle').hidden = !!embeddedReader || !session || chooserOpen || personalOpen;
+  el('nav-pin').hidden = el('nav-toggle').hidden;
   el('change-book').disabled = locked;
   for (const button of el('book-tabs').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('cancel-book-picker').disabled = locked;
@@ -1400,15 +1732,17 @@ function controls() {
 function render() {
   if (searchSession !== session || chooserOpen) { searchBook.clear(); searchGeneration++; searchSession = session; }
   renderBookTabs();
-  el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
+  el('editor').hidden = personalOpen || !session || chooserOpen; el('empty').hidden = personalOpen || (!!session && !chooserOpen);
+  el('personal-area').hidden = !personalOpen;
   el('cancel-book-picker').hidden = true;
   document.querySelector('main').classList.toggle('reading', !!session && !chooserOpen);
-  if (!session || chooserOpen) renderLibrary();
+  if ((!session || chooserOpen) && !personalOpen) renderLibrary();
   el('screen-title').textContent = !session || chooserOpen ? 'ספריית אוצריא' : session.book.details.title ?? session.book.identity.bookId;
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
   if (session && !chooserOpen) showEditorRange(session.view?.visibleOffset ?? session.view?.selectionStart ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
   renderNavigation();
   controls();
+  if (embeddedReader) el('book-tabs').hidden = true;
 }
 function renderBookTabs() {
   const items = openTabs(), activeId = activeTabId();
@@ -1578,6 +1912,16 @@ function navigateTo(location) {
   el('section-number').value = String(location.sectionIndex + 1);
   const editor = el('proposed'), offset = positionInBook(session.book, location, session.editedText);
   scrollEditorToOffset(offset);
+  reportReaderLocation();
+}
+function reportReaderLocation() {
+  if (!embeddedReader || !session) return;
+  clearTimeout(locationTimer);
+  locationTimer = setTimeout(() => {
+    const index = session.location?.sectionIndex ?? 0;
+    if (index === lastReportedIndex) return;
+    call('reader.reportTextReaderLocation', { index }).then(() => { lastReportedIndex = index; }).catch(error => message(error.message, true));
+  }, 100);
 }
 function scrollEditorToOffset(offset, end = offset) {
   offset = displayProjection.toDisplay(offset); end = displayProjection.toDisplay(end);
@@ -1597,7 +1941,7 @@ function scrollEditorToOffset(offset, end = offset) {
   editor.scrollTop = Math.max(0, marker.offsetTop - editor.clientHeight / 4); mirror.remove();
 }
 function showEditorRange(offset) {
-  displayProjection = projectNikud(session.editedText, session.hideNikud);
+  displayProjection = projectNikud(session.editedText, session.hideNikud, true, session.book.originalText);
   offset = displayProjection.toDisplay(offset);
   if (!continuousEditor && el('proposed').clientWidth > 0) {
     continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
@@ -1630,6 +1974,7 @@ function syncScrollNavigation(offset) {
   let lo = 0, hi = sections.length - 1;
   while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (sections[mid].start <= originalOffset) lo = mid; else hi = mid - 1; }
   session.location = { sectionIndex: sections[lo].index, offset: Math.max(0, originalOffset - sections[lo].start) };
+  reportReaderLocation();
   el('section-number').value = String(sections[lo].index + 1);
   const key = activeTocKey(tocTree, sections[lo].index);
   if (key === selectedKey) return;
@@ -1707,6 +2052,7 @@ async function persist(value = session, books = sessions) {
       queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => draftStorage.write(snapshot));
   await writes;
+  for (const item of nextBooks) for (const report of item.queue ?? []) if (report.sent && report.submission) await personalHistory.save(item.book, report);
   // A background write must not restore tabs closed or switched since its snapshot.
   if (books === sessions && savedRevision === revision) sessions = nextBooks;
   if (savedRevision === revision) {
@@ -1753,15 +2099,29 @@ function finishLibraryTab() {
   if (chooserOpen && activeLibraryId) libraryTabs = libraryTabs.filter(item => item.id !== activeLibraryId);
   activeLibraryId = null;
 }
+// A click on a closed plugin can arrive before plugin.boot; wait for initialization to actually start.
+const initializationStarted = new Promise(resolve => { startInitialization = resolve; });
 let openings = Promise.resolve();
 function requestBook(event) {
   if (!['correct-book', 'correct-selection'].includes(event.itemId)) return;
   openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted;
     await initialized;
+    if (embeddedReader) return;
     const identity = identityFrom(event);
     await openBook(identity);
   }).catch(error => message(error.message, true));
 }
+function requestLibrary() {
+  openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted;
+    await initialized;
+    if (!embeddedReader) await showLibrary();
+  }).catch(error => message(error.message, true));
+}
+// WebView's editable-field menu differs from Otzaria's reader menu. Native
+// keyboard editing shortcuts remain available without this browser popup.
+el('proposed').addEventListener('contextmenu', event => event.preventDefault());
 el('proposed').addEventListener('input', () => {
   if (!session || loading || sending || hasPartialDelivery()) return;
   const value = el('proposed').value;
@@ -1773,7 +2133,7 @@ el('proposed').addEventListener('input', () => {
     el('proposed').value = visibleValue;
     visibleRange.end = visibleRange.start + visibleValue.length;
   }
-  displayProjection = projectNikud(editedText, session.hideNikud);
+  displayProjection = projectNikud(editedText, session.hideNikud, true, session.book.originalText);
   if (editedText === session.editedText) return;
   searchGeneration++;
   if (session.completed) session.reportedText = session.editedText;
@@ -1995,7 +2355,7 @@ el('editor').addEventListener('submit', async event => {
         }
         throw error;
       }
-      item.sent = true; sent++; await persist();
+      item.sent = true; item.sentAt = Date.now(); sent++; await persist();
       if (sent < session.queue.length) await new Promise(resolve => setTimeout(resolve, 350));
     }
     session.completed = session.queue.every(item => item.sent); await persist();
@@ -2009,6 +2369,19 @@ el('editor').addEventListener('submit', async event => {
   } finally { sending = false; controls(); }
 });
 async function initialize(boot) {
+  embeddedReader = boot?.reader?.embedded ? boot.reader : null;
+  if (embeddedReader) {
+    document.body?.classList.add('embedded-reader');
+    const prefix = `reader-session:${encodeURIComponent(embeddedReader.bookUid ?? embeddedReader.bookId)}:`;
+    const keys = await call('storage.list');
+    let latest = null, readKey;
+    for (const key of keys ?? []) if (key.startsWith(prefix)) {
+      const saved = await call('storage.get', { key });
+      if (saved && (!latest || saved.updatedAt > latest.updatedAt)) { latest = saved; readKey = key; }
+    }
+    const indexKey = prefix + newId();
+    draftStorage = createDraftStorage(call, newId, { indexKey, readKey: readKey ?? indexKey });
+  }
   applyTheme(boot?.theme);
   const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
     call('settings.get', { key: 'key-library-view-mode' })]);
@@ -2022,6 +2395,17 @@ async function initialize(boot) {
   chooserOpen = !!activeLibraryId;
   for (const item of sessions) if (item.queue?.length && item.queue.every(report => report.sent)) item.completed = true;
   session = sessions.find(item => item.id === stored?.activeId) ?? sessions[0] ?? null;
+  if (embeddedReader) {
+    sessions = sessions.filter(item => item.book.identity.bookId === embeddedReader.bookId &&
+      (!embeddedReader.bookUid || item.book.identity.bookUid === embeddedReader.bookUid));
+    session = sessions[0] ?? null; libraryTabs = []; activeLibraryId = null; chooserOpen = false;
+    await openBook(identityFrom(embeddedReader));
+    applyReaderDisplay(embeddedReader.display);
+    navigateTo(readerPosition(embeddedReader));
+    render();
+    message();
+    return;
+  }
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
   for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
@@ -2062,14 +2446,16 @@ if (host) {
   host.on('plugin.permissions_changed', event => {
     if (event.permissions?.includes('settings.read')) initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
   });
-  host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') showLibrary(); });
+  host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') requestLibrary(); });
+  host.on('reader.textReaderNavigate', event => queueReaderEvent(event));
+  host.on('reader.textReaderCommand', event => queueReaderEvent(event, true));
   host.on('plugin.suspended', () => { if (session || libraryTabs.length) { captureView(); persist().catch(error => message(error.message, true)); } });
   host.on('plugin.resumed', () => {
     initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
     refreshActiveDisplay().catch(error => message(error.message, true));
   });
-  host.on('plugin.boot', boot => { initialized ??= initialize(boot); initialized.catch(error => message(error.message, true)); });
-  if (host._booted) { initialized ??= initialize(); initialized.catch(error => message(error.message, true)); }
+  host.on('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => message(error.message, true)); });
+  if (host._booted) { initialized ??= initialize(); startInitialization(); initialized.catch(error => message(error.message, true)); }
 } else { el('empty').hidden = false; message('יש לפתוח את התוסף מתוך אוצריא.'); }
 
 })();

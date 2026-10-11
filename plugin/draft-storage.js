@@ -29,7 +29,7 @@ export function decodeStoredDraft(book, draft) {
   return { ...state, book: restoredBook, editedText: restorePatch(book.originalText, editedPatch),
     ...(reportedPatch ? { reportedText: restorePatch(book.originalText, reportedPatch) } : {}) };
 }
-export function createDraftStorage(call, idFactory) {
+export function createDraftStorage(call, idFactory, { indexKey = 'book-session', readKey = indexKey } = {}) {
   let committed = new Map();
   const patches = new Map(), garbage = new Set();
   function patchFor(id, kind, source, text) {
@@ -38,7 +38,7 @@ export function createDraftStorage(call, idFactory) {
     const patch = textPatch(source, text); patches.set(key, { source, text, patch }); return patch;
   }
   async function read() {
-    const index = await call('storage.get', { key: 'book-session' });
+    const index = await call('storage.get', { key: readKey });
     if (index?.schemaVersion !== 3) return index;
     const sessions = [], restored = new Map();
     for (const ref of index.sessions) {
@@ -48,7 +48,8 @@ export function createDraftStorage(call, idFactory) {
       const item = decodeStoredDraft(book, draft);
       sessions.push(item); restored.set(ref.id, { ...ref, serialized: JSON.stringify(draft), book: item.book });
     }
-    committed = restored;
+    // A new reader instance forks a saved draft; it never deletes another instance's files.
+    committed = readKey === indexKey ? restored : new Map();
     return { ...index, schemaVersion: 2, sessions };
   }
   async function write(snapshot) {
@@ -71,9 +72,9 @@ export function createDraftStorage(call, idFactory) {
       }
       next.set(item.id, { id: item.id, bookKey, draftKey, serialized, book });
     }
-    if (snapshot) await call('storage.set', { key: 'book-session', value: { ...snapshot, schemaVersion: 3,
+    if (snapshot) await call('storage.set', { key: indexKey, value: { ...snapshot, ...(indexKey !== 'book-session' ? { updatedAt: Date.now() } : {}), schemaVersion: 3,
       sessions: [...next.values()].map(({ id, bookKey, draftKey }) => ({ id, bookKey, draftKey })) } });
-    else await call('storage.remove', { key: 'book-session' });
+    else await call('storage.remove', { key: indexKey });
     for (const ref of committed.values()) { garbage.add(ref.bookKey); garbage.add(ref.draftKey); }
     committed = next;
     for (const ref of next.values()) { garbage.delete(ref.bookKey); garbage.delete(ref.draftKey); }

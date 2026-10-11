@@ -12,9 +12,10 @@ import { createDraftStorage } from './draft-storage.js';
 import { createSourceGuard } from './source-guard.js';
 import { editorRange, createContinuousEditor } from './editor-window.js';
 import { buildTocTree, flattenTocTree, activeTocKey, ensurePathExpanded, setAllExpanded } from './toc-tree.js';
+import { createPersonalHistory, historyStatus } from './personal-history.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 const newId = () => `${Date.now()}-${Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join('')}`;
-let session = null, initialized, loading = false, sending = false, pause = false;
+let session = null, initialized, startInitialization, loading = false, sending = false, pause = false;
 let sessions = [];
 let chooserOpen = false;
 let libraryTabs = [], activeLibraryId = null;
@@ -32,8 +33,168 @@ let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
-const draftStorage = createDraftStorage(call, newId), sourceGuard = createSourceGuard(call);
+let draftStorage = createDraftStorage(call, newId);
+const sourceGuard = createSourceGuard(call), personalHistory = createPersonalHistory(call);
+let embeddedReader = null, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
+let locationTimer, lastReportedIndex = null, navigationOpen = true, navigationPinned = false;
 const searchBook = createAsyncBookSearch();
+function applyReaderDisplay(display) {
+  if (!display) return;
+  if (Number.isFinite(display.fontSize)) document.documentElement.style.setProperty('--font-size', `${display.fontSize}px`);
+  if (session && typeof display.profile?.nikud === 'string') {
+    session.hideNikud = display.profile.nikud === 'hide';
+    if (session.view) { delete session.view.geometry; delete session.view.scrollTop; }
+  }
+}
+function queueReaderEvent(event, command = false) {
+  openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted; await initialized;
+    if (!embeddedReader || event.bookUid && event.bookUid !== embeddedReader.bookUid || event.bookId && event.bookId !== embeddedReader.bookId) return;
+    if (command && event.action === 'advance') {
+      el('book-scroll').scrollTop += (event.direction === -1 ? -1 : 1) * el('book-scroll').clientHeight * .85;
+    } else if (command && event.action === 'settings') {
+      el('reader-settings').hidden = !el('reader-settings').hidden;
+      el('reader-menu').open = !el('reader-settings').hidden;
+      if (!el('reader-settings').hidden) el('font-larger').focus();
+    } else {
+      captureView(); embeddedReader = { ...embeddedReader, ...event };
+      applyReaderDisplay(event.display); render();
+      if (!command) navigateTo(readerPosition(event)); else restoreView();
+      if (!command && event.searchQuery) {
+        el('book-search').value = event.searchQuery;
+        await renderSearchResults();
+      }
+    }
+  }).catch(error => message(error.message, true));
+}
+function setNavigation(open) {
+  if (open === navigationOpen) return;
+  const offset = continuousEditor?.visibleOffset();
+  const viewport = el('book-scroll');
+  const atEnd = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+  navigationOpen = open;
+  document.body?.classList.toggle('navigation-closed', !open);
+  el('nav-toggle').setAttribute('aria-expanded', String(open));
+  if (continuousEditor && Number.isFinite(offset)) continuousEditor.reflow(offset, atEnd);
+}
+el('nav-toggle').addEventListener('click', () => setNavigation(!navigationOpen));
+for (const id of ['nav-toggle', 'nav-pin']) el(id).addEventListener('pointerdown', event => {
+  // Mouse toggles preserve the reader caret; keyboard traversal still reaches the controls.
+  if (event.button === 0 && document.activeElement === el('proposed')) event.preventDefault();
+});
+el('nav-pin').addEventListener('click', () => {
+  navigationPinned = !navigationPinned;
+  document.body?.classList.toggle('navigation-pinned', navigationPinned);
+  el('nav-pin').setAttribute('aria-pressed', String(navigationPinned));
+  el('nav-pin').textContent = navigationPinned ? 'בטל נעיצה' : 'נעץ ניווט';
+});
+el('reader-menu').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.preventDefault(); el('reader-menu').open = false; el('proposed').focus({ preventScroll: true }); }
+});
+el('book-scroll').addEventListener('wheel', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); }, { passive: true });
+el('book-scroll').addEventListener('touchmove', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); }, { passive: true });
+el('book-scroll').addEventListener('pointerdown', () => { if (!embeddedReader && !navigationPinned) setNavigation(false); });
+el('proposed').addEventListener('keydown', event => {
+  if (!embeddedReader && !navigationPinned && ['PageDown', 'PageUp'].includes(event.key)) setNavigation(false);
+});
+el('use-reader').addEventListener('click', async () => {
+  try {
+    await call('reader.setDefaultTextReader', { enabled: true });
+    if (session) await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0 });
+    message('התוסף נבחר כקורא הטקסט באוצריא.', false, 3000);
+  } catch (error) { message(error.message, true); }
+});
+el('native-reader').addEventListener('click', async () => {
+  try { await persist(); await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0, reader: 'native' }); }
+  catch (error) { message(error.message, true); }
+});
+for (const [id, delta] of [['font-smaller', -2], ['font-larger', 2]]) el(id).addEventListener('click', async () => {
+  const size = Number.parseFloat(getComputedStyle(el('proposed')).fontSize);
+  try { await call('reader.setTextReaderFontSize', { fontSize: Math.max(14, Math.min(60, size + delta)) }); }
+  catch (error) { message(error.message, true); }
+});
+function renderHistory() {
+  const drafts = savedReaderDrafts.map(({ key, title, updatedAt }) => {
+    const row = document.createElement('article'); row.className = 'history-card';
+    const label = document.createElement('strong'); label.textContent = `${title} — טיוטה`;
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'ghost'; button.textContent = 'פתח טיוטה';
+    button.addEventListener('click', async () => {
+      if (loading || sending) return;
+      try {
+        const saved = await createDraftStorage(call, newId, { indexKey: `draft-preview:${newId()}`, readKey: key }).read();
+        const item = saved?.sessions?.[0];
+        if (!item) throw new Error('הטיוטה אינה זמינה.');
+        if (embeddedReader && item.book.identity.bookUid !== embeddedReader.bookUid) {
+          await call('reader.openBook', { ...item.book.identity, index: item.location?.sectionIndex ?? 0 }); return;
+        }
+        if (session) await persist();
+        const next = { ...item, id: newId() };
+        await persist(next, embeddedReader ? [next] : sessions); if (embeddedReader) sessions = [next];
+        session = next; personalOpen = false; chooserOpen = false; render(); restoreView(); scheduleSave();
+      } catch (error) { message(error.message, true); }
+    });
+    const date = document.createElement('small'); date.textContent = new Date(updatedAt).toLocaleDateString('he-IL');
+    row.append(label, date, button); return row;
+  });
+  const rows = historyItems.map(item => {
+    const row = document.createElement('article'); row.className = 'history-card';
+    const title = document.createElement('strong'); title.textContent = `${item.title} — ${item.location ?? `פסקה ${item.submission.sectionIndex + 1}`}`;
+    const state = document.createElement('p'); state.textContent = historyStatus[item.status] ?? historyStatus.unchecked;
+    const original = document.createElement('p'); original.textContent = `מקור: ${item.submission.original}`;
+    const proposed = document.createElement('p'); proposed.textContent = `מוצע: ${item.submission.proposed || '(מחיקה)'}`;
+    const date = document.createElement('small'); date.textContent = `נשלח: ${new Date(item.sentAt).toLocaleDateString('he-IL')}${item.checkedAt ? ` · נבדק: ${new Date(item.checkedAt).toLocaleDateString('he-IL')}` : ''}`;
+    row.append(title, state, original, proposed, date); return row;
+  });
+  if (!rows.length) { const empty = document.createElement('p'); empty.textContent = 'אין עדיין תיקונים שנשלחו.'; rows.push(empty); }
+  el('personal-list').replaceChildren(...drafts, ...rows);
+}
+el('personal-open').addEventListener('click', async () => {
+  if (loading || sending || scanning) return;
+  captureView(); el('reader-menu').open = false; personalOpen = true; render();
+  el('personal-scan').disabled = true;
+  historyItems = []; savedReaderDrafts = []; renderHistory();
+  try {
+    for (const item of sessions) for (const report of item.queue ?? []) if (report.sent && report.submission) await personalHistory.save(item.book, report);
+    historyItems = await personalHistory.list(); renderHistory(); el('personal-scan').focus();
+    const keys = await call('storage.list'); savedReaderDrafts = [];
+    for (const key of keys ?? []) if (key.startsWith('reader-session:')) {
+      const index = await call('storage.get', { key }), ref = index?.sessions?.[0];
+      if (!ref) continue;
+      const book = await call('storage.get', { key: ref.bookKey });
+      const draft = await call('storage.get', { key: ref.draftKey });
+      if (draft?.editedPatch?.length || draft?.queue?.some(item => !item.sent)) savedReaderDrafts.push({ key, title: book?.details?.title ?? book?.identity?.bookId ?? 'ספר', updatedAt: index.updatedAt });
+    }
+    savedReaderDrafts.sort((a, b) => b.updatedAt - a.updatedAt); renderHistory();
+  } catch (error) { message(error.message, true); }
+  finally { if (!scanning) el('personal-scan').disabled = false; }
+});
+el('personal-back').addEventListener('click', () => { personalOpen = false; render(); restoreView(); });
+el('personal-scan').addEventListener('click', async () => {
+  if (scanning) return;
+  scanning = true; el('personal-scan').disabled = true;
+  const groups = new Map();
+  for (let i = 0; i < historyItems.length; i++) {
+    const item = historyItems[i], key = item.identity.bookUid ?? item.identity.bookId;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  }
+  let completed = 0;
+  try {
+    for (const indices of groups.values()) {
+      let lines;
+      try { lines = (await loadBook(call, historyItems[indices[0]].identity)).sections.map(section => section.text); }
+      catch { /* Mark this book unavailable without retaining other complete books. */ }
+      for (const i of indices) {
+        const item = historyItems[i];
+        message(`בודק תיקון ${++completed} מתוך ${historyItems.length}…`);
+        historyItems[i] = lines ? await personalHistory.check(item, lines) : await personalHistory.checkUnavailable(item);
+        renderHistory(); await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    }
+    message('הבדיקה מול הספרייה המקומית הסתיימה.', false, 3000);
+  } catch (error) { message(error.message, true); }
+  finally { scanning = false; el('personal-scan').disabled = false; }
+});
 function message(text = '', error = false, duration = 0) {
   clearTimeout(statusTimer);
   statusText = text;
@@ -85,8 +246,12 @@ function controls() {
   const locked = loading || sending;
   el('proposed').setAttribute('aria-describedby', 'status');
   el('proposed').readOnly = locked || !!hasPartialDelivery();
-  el('send').hidden = !session || chooserOpen;
-  el('change-book').hidden = false;
+  el('send').hidden = !session || chooserOpen || personalOpen;
+  el('change-book').hidden = !!embeddedReader || personalOpen;
+  el('use-reader').hidden = !!embeddedReader;
+  el('native-reader').hidden = !embeddedReader;
+  el('nav-toggle').hidden = !!embeddedReader || !session || chooserOpen || personalOpen;
+  el('nav-pin').hidden = el('nav-toggle').hidden;
   el('change-book').disabled = locked;
   for (const button of el('book-tabs').querySelectorAll?.('button') ?? []) button.disabled = locked;
   el('cancel-book-picker').disabled = locked;
@@ -101,15 +266,17 @@ function controls() {
 function render() {
   if (searchSession !== session || chooserOpen) { searchBook.clear(); searchGeneration++; searchSession = session; }
   renderBookTabs();
-  el('editor').hidden = !session || chooserOpen; el('empty').hidden = !!session && !chooserOpen;
+  el('editor').hidden = personalOpen || !session || chooserOpen; el('empty').hidden = personalOpen || (!!session && !chooserOpen);
+  el('personal-area').hidden = !personalOpen;
   el('cancel-book-picker').hidden = true;
   document.querySelector('main').classList.toggle('reading', !!session && !chooserOpen);
-  if (!session || chooserOpen) renderLibrary();
+  if ((!session || chooserOpen) && !personalOpen) renderLibrary();
   el('screen-title').textContent = !session || chooserOpen ? 'ספריית אוצריא' : session.book.details.title ?? session.book.identity.bookId;
   el('nav-title').textContent = session?.book.details.title ?? session?.book.identity.bookId ?? 'תוכן הספר';
   if (session && !chooserOpen) showEditorRange(session.view?.visibleOffset ?? session.view?.selectionStart ?? positionInBook(session.book, session.location ?? { sectionIndex: 0, offset: 0 }, session.editedText));
   renderNavigation();
   controls();
+  if (embeddedReader) el('book-tabs').hidden = true;
 }
 function renderBookTabs() {
   const items = openTabs(), activeId = activeTabId();
@@ -279,6 +446,16 @@ function navigateTo(location) {
   el('section-number').value = String(location.sectionIndex + 1);
   const editor = el('proposed'), offset = positionInBook(session.book, location, session.editedText);
   scrollEditorToOffset(offset);
+  reportReaderLocation();
+}
+function reportReaderLocation() {
+  if (!embeddedReader || !session) return;
+  clearTimeout(locationTimer);
+  locationTimer = setTimeout(() => {
+    const index = session.location?.sectionIndex ?? 0;
+    if (index === lastReportedIndex) return;
+    call('reader.reportTextReaderLocation', { index }).then(() => { lastReportedIndex = index; }).catch(error => message(error.message, true));
+  }, 100);
 }
 function scrollEditorToOffset(offset, end = offset) {
   offset = displayProjection.toDisplay(offset); end = displayProjection.toDisplay(end);
@@ -298,7 +475,7 @@ function scrollEditorToOffset(offset, end = offset) {
   editor.scrollTop = Math.max(0, marker.offsetTop - editor.clientHeight / 4); mirror.remove();
 }
 function showEditorRange(offset) {
-  displayProjection = projectNikud(session.editedText, session.hideNikud);
+  displayProjection = projectNikud(session.editedText, session.hideNikud, true, session.book.originalText);
   offset = displayProjection.toDisplay(offset);
   if (!continuousEditor && el('proposed').clientWidth > 0) {
     continuousEditor = createContinuousEditor(el('book-scroll'), el('editor-canvas'), el('proposed'), syncScrollNavigation);
@@ -331,6 +508,7 @@ function syncScrollNavigation(offset) {
   let lo = 0, hi = sections.length - 1;
   while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (sections[mid].start <= originalOffset) lo = mid; else hi = mid - 1; }
   session.location = { sectionIndex: sections[lo].index, offset: Math.max(0, originalOffset - sections[lo].start) };
+  reportReaderLocation();
   el('section-number').value = String(sections[lo].index + 1);
   const key = activeTocKey(tocTree, sections[lo].index);
   if (key === selectedKey) return;
@@ -408,6 +586,7 @@ async function persist(value = session, books = sessions) {
       queue: item.queue?.map(report => ({ ...report, payload: { ...report.payload } })) ?? null })) } : null, savedRevision = revision;
   writes = writes.catch(() => {}).then(() => draftStorage.write(snapshot));
   await writes;
+  for (const item of nextBooks) for (const report of item.queue ?? []) if (report.sent && report.submission) await personalHistory.save(item.book, report);
   // A background write must not restore tabs closed or switched since its snapshot.
   if (books === sessions && savedRevision === revision) sessions = nextBooks;
   if (savedRevision === revision) {
@@ -454,15 +633,29 @@ function finishLibraryTab() {
   if (chooserOpen && activeLibraryId) libraryTabs = libraryTabs.filter(item => item.id !== activeLibraryId);
   activeLibraryId = null;
 }
+// A click on a closed plugin can arrive before plugin.boot; wait for initialization to actually start.
+const initializationStarted = new Promise(resolve => { startInitialization = resolve; });
 let openings = Promise.resolve();
 function requestBook(event) {
   if (!['correct-book', 'correct-selection'].includes(event.itemId)) return;
   openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted;
     await initialized;
+    if (embeddedReader) return;
     const identity = identityFrom(event);
     await openBook(identity);
   }).catch(error => message(error.message, true));
 }
+function requestLibrary() {
+  openings = openings.catch(() => {}).then(async () => {
+    await initializationStarted;
+    await initialized;
+    if (!embeddedReader) await showLibrary();
+  }).catch(error => message(error.message, true));
+}
+// WebView's editable-field menu differs from Otzaria's reader menu. Native
+// keyboard editing shortcuts remain available without this browser popup.
+el('proposed').addEventListener('contextmenu', event => event.preventDefault());
 el('proposed').addEventListener('input', () => {
   if (!session || loading || sending || hasPartialDelivery()) return;
   const value = el('proposed').value;
@@ -474,7 +667,7 @@ el('proposed').addEventListener('input', () => {
     el('proposed').value = visibleValue;
     visibleRange.end = visibleRange.start + visibleValue.length;
   }
-  displayProjection = projectNikud(editedText, session.hideNikud);
+  displayProjection = projectNikud(editedText, session.hideNikud, true, session.book.originalText);
   if (editedText === session.editedText) return;
   searchGeneration++;
   if (session.completed) session.reportedText = session.editedText;
@@ -696,7 +889,7 @@ el('editor').addEventListener('submit', async event => {
         }
         throw error;
       }
-      item.sent = true; sent++; await persist();
+      item.sent = true; item.sentAt = Date.now(); sent++; await persist();
       if (sent < session.queue.length) await new Promise(resolve => setTimeout(resolve, 350));
     }
     session.completed = session.queue.every(item => item.sent); await persist();
@@ -710,6 +903,19 @@ el('editor').addEventListener('submit', async event => {
   } finally { sending = false; controls(); }
 });
 async function initialize(boot) {
+  embeddedReader = boot?.reader?.embedded ? boot.reader : null;
+  if (embeddedReader) {
+    document.body?.classList.add('embedded-reader');
+    const prefix = `reader-session:${encodeURIComponent(embeddedReader.bookUid ?? embeddedReader.bookId)}:`;
+    const keys = await call('storage.list');
+    let latest = null, readKey;
+    for (const key of keys ?? []) if (key.startsWith(prefix)) {
+      const saved = await call('storage.get', { key });
+      if (saved && (!latest || saved.updatedAt > latest.updatedAt)) { latest = saved; readKey = key; }
+    }
+    const indexKey = prefix + newId();
+    draftStorage = createDraftStorage(call, newId, { indexKey, readKey: readKey ?? indexKey });
+  }
   applyTheme(boot?.theme);
   const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
     call('settings.get', { key: 'key-library-view-mode' })]);
@@ -723,6 +929,17 @@ async function initialize(boot) {
   chooserOpen = !!activeLibraryId;
   for (const item of sessions) if (item.queue?.length && item.queue.every(report => report.sent)) item.completed = true;
   session = sessions.find(item => item.id === stored?.activeId) ?? sessions[0] ?? null;
+  if (embeddedReader) {
+    sessions = sessions.filter(item => item.book.identity.bookId === embeddedReader.bookId &&
+      (!embeddedReader.bookUid || item.book.identity.bookUid === embeddedReader.bookUid));
+    session = sessions[0] ?? null; libraryTabs = []; activeLibraryId = null; chooserOpen = false;
+    await openBook(identityFrom(embeddedReader));
+    applyReaderDisplay(embeddedReader.display);
+    navigateTo(readerPosition(embeddedReader));
+    render();
+    message();
+    return;
+  }
   for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
   for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
@@ -763,12 +980,14 @@ if (host) {
   host.on('plugin.permissions_changed', event => {
     if (event.permissions?.includes('settings.read')) initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
   });
-  host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') showLibrary(); });
+  host.on('plugin.page_opened', event => { if (event.source === 'newTabButton') requestLibrary(); });
+  host.on('reader.textReaderNavigate', event => queueReaderEvent(event));
+  host.on('reader.textReaderCommand', event => queueReaderEvent(event, true));
   host.on('plugin.suspended', () => { if (session || libraryTabs.length) { captureView(); persist().catch(error => message(error.message, true)); } });
   host.on('plugin.resumed', () => {
     initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));
     refreshActiveDisplay().catch(error => message(error.message, true));
   });
-  host.on('plugin.boot', boot => { initialized ??= initialize(boot); initialized.catch(error => message(error.message, true)); });
-  if (host._booted) { initialized ??= initialize(); initialized.catch(error => message(error.message, true)); }
+  host.on('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => message(error.message, true)); });
+  if (host._booted) { initialized ??= initialize(); startInitialization(); initialized.catch(error => message(error.message, true)); }
 } else { el('empty').hidden = false; message('יש לפתוח את התוסף מתוך אוצריא.'); }

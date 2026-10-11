@@ -2,8 +2,31 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; }
 body { margin: 0; display: flex; flex-direction: column; font: 14px var(--font-ui); background: var(--surface); color: var(--onSurface); }
-.topbar { height: 56px; flex-shrink: 0; padding: 8px 16px; display: flex; align-items: center; gap: 16px; background: var(--surfaceContainerHigh); }
-.topbar strong { font-size: 16px; font-weight: 600; white-space: nowrap; }
+.tabbar-shell { display: flex; align-items: center; height: 40px; flex-shrink: 0; min-width: 0; background: var(--surface); }
+.tabbar-shell #book-tabs { flex: 1; min-width: 0; padding-inline: 8px; }
+.tabbar-tools { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; margin-inline-start: auto; padding-inline: 8px; }
+.tabbar-tools #send { min-height: 32px; padding: 4px 12px; }
+button#nav-toggle { flex: 0 0 40px; width: 40px; height: 40px; min-height: 40px; padding: 8px; margin-inline-start: 6px; }
+#nav-toggle svg { width: 24px; height: 24px; }
+#reader-menu { position: relative; }
+#reader-menu summary { display: grid; place-items: center; width: 32px; height: 32px; padding: 6px; cursor: pointer; border-radius: 8px; list-style: none; }
+#reader-menu summary::-webkit-details-marker { display: none; }
+#reader-menu summary:hover { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
+#reader-menu summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.reader-menu-items { position: absolute; inset-inline-end: 0; top: calc(100% + 4px); min-width: 220px; padding: 4px; border-radius: 8px; background: var(--surfaceContainerHigh); box-shadow: 0 3px 12px color-mix(in srgb, var(--onSurface) 20%, transparent); z-index: 20; }
+.reader-menu-items > button { display: block; width: 100%; text-align: start; min-height: 36px; padding: 8px 12px; }
+.embedded-reader .tabbar-shell { position: absolute; bottom: 8px; inset-inline-end: 8px; z-index: 10; height: auto; border-radius: 8px; background: var(--surfaceContainerHigh); }
+.embedded-reader .reader-menu-items { top: auto; bottom: calc(100% + 4px); }
+.editor-layout { position: relative; }
+.navigation-closed .book-navigation { display: none; }
+.embedded-reader #book-tabs, .embedded-reader .book-navigation { display: none !important; }
+.embedded-reader main.reading #status { max-width: calc(100% - 28px); }
+#personal-area { overflow: auto; padding: 16px; }
+.personal-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.personal-toolbar h1 { margin-inline-end: auto; }
+.history-card { background: var(--surfaceContainer, var(--surface)); border-radius: 8px; padding: 16px; margin-block: 8px; overflow-wrap: anywhere; }
+.history-card p { margin-block: 8px; white-space: pre-wrap; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 #send { margin-inline-start: auto; white-space: nowrap; }
 #book-tabs { display: flex; flex-shrink: 0; height: 40px; padding-inline: 15px; overflow-x: auto; background: var(--surface); }
 .book-tab { position: relative; display: flex; align-items: center; flex: 0 1 220px; min-width: 100px; margin: 4px 6px 0; padding-bottom: 4px; border-radius: 8px 8px 0 0; color: var(--onSurface); }
@@ -57,7 +80,7 @@ p { line-height: 1.6; }
 main.reading #status { position: absolute; z-index: 2; bottom: 8px; inset-inline-end: 14px; max-width: calc(100% - 380px); pointer-events: none; }
 #editor { flex: 1; min-height: 0; }
 .editor-layout { display: flex; flex-direction: row; height: 100%; min-height: 0; }
-.book-navigation { width: 340px; flex: 0 0 340px; display: flex; flex-direction: column; min-height: 0; background: var(--surfaceContainerHigh); }
+.book-navigation { width: 340px; flex: 0 0 340px; max-width: 50%; display: flex; flex-direction: column; min-height: 0; background: var(--surfaceContainerHigh); }
 .nav-tabs { display: flex; height: 44px; flex-shrink: 0; padding: 4px 14px; gap: 8px; }
 .nav-tabs button { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-height: 36px; padding: 3px 8px; background: transparent; color: var(--onSurfaceVariant); font-size: 11px; font-weight: 500; border-radius: 8px; }
 .nav-tabs button[aria-selected="true"] { background: var(--secondaryContainer); color: var(--onSurface); }
@@ -82,7 +105,7 @@ html[style*="color-scheme: dark"] .toc-row { border-bottom-color: #000; }
 .toc-row[style*="--level: 0"], .toc-row[style*="--level:0"] { font-weight: 700; }
 .toc-row[style*="--level: 1"], .toc-row[style*="--level:1"] { font-weight: 600; }
 .toc-row:hover { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
-.toc-row.selected { background: color-mix(in srgb, var(--secondaryContainer) 40%, transparent); }
+.toc-row.selected { background: color-mix(in srgb, var(--primaryContainer, var(--secondaryContainer)) 30%, transparent); }
 .toc-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.toc-label { min-height: 26px; padding: 0; background: transparent; color: inherit; text-align: start; font: inherit; border-radius: 0; }
 .toc-chevron { flex: 0 0 18px; width: 18px; height: 18px; color: var(--onSurfaceVariant); }
@@ -106,7 +129,7 @@ button:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; 
 /* NavTreeTile applies focus to the whole row, never a box around its label. */
 button.toc-label:focus-visible, button.toc-chevron:focus-visible { outline: none; }
 .toc-row:has(button:focus-visible) { background: color-mix(in srgb, var(--onSurface) 12%, transparent); }
-.toc-row.selected:has(button:focus-visible) { background: color-mix(in srgb, var(--secondaryContainer) 40%, transparent); }
+.toc-row.selected:has(button:focus-visible) { background: color-mix(in srgb, var(--primaryContainer, var(--secondaryContainer)) 30%, transparent); }
 button:disabled { background: color-mix(in srgb, var(--onSurface) 12%, var(--surface)); color: color-mix(in srgb, var(--onSurface) 38%, var(--surface)); cursor: default; }
 button.ghost, button.icon-button { background: transparent; color: var(--onSurface); }
 button.ghost:hover, button.icon-button:hover { background: color-mix(in srgb, var(--onSurface) 8%, transparent); }
@@ -115,4 +138,4 @@ button.icon-button { width: 32px; height: 32px; min-height: 32px; padding: 6px; 
 #change-book svg { width: 18px; height: 18px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 @media (max-width: 720px) { .book-navigation { width: 250px; flex-basis: 250px; } #editor-canvas { --book-padding: 20px; --book-inline-padding: 20px; } main.reading #status { max-width: calc(100% - 280px); } }
-@media (max-width: 480px) { .topbar { height: 44px; padding: 4px 8px; gap: 8px; } .topbar strong { font-size: 14px; } main { padding: 16px; } .book-navigation { width: 180px; flex-basis: 180px; } .nav-header { padding-inline: 8px; } #toc-list { padding-inline: 8px; } #editor-canvas { --book-padding: 16px; --book-inline-padding: 16px; } main.reading #status { max-width: calc(100% - 200px); } }
+@media (max-width: 480px) { main { padding: 16px; } .tabbar-tools { gap: 0; padding-inline: 4px; } .tabbar-tools #send { padding-inline: 8px; } .book-navigation { width: 180px; flex-basis: 180px; } .nav-header { padding-inline: 8px; } #toc-list { padding-inline: 8px; } #editor-canvas { --book-padding: 16px; --book-inline-padding: 16px; } main.reading #status { max-width: calc(100% - 200px); } }

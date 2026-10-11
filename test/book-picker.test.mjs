@@ -48,7 +48,9 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
   } } };
   try {
     await import('../plugin/app.js?book-picker');
-    await new Promise(resolve => setTimeout(resolve, 150));
+    for (let attempt = 0; attempt < 100 && !el('library-list').children.length; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     const choose = async index => { await el('library-list').children[0].children[index].fire('click'); };
     assert.equal(el('empty').hidden, false);
     assert.equal(readerQueries, 0, 'home must load the library without querying open reader tabs');
@@ -59,6 +61,9 @@ test('book tabs preserve independent drafts, reuse open books, and confirm closi
     assert.equal(el('nav-title').textContent, titles.שני);
     assert.equal(el('screen-title').textContent, titles.שני);
     assert.equal(el('proposed').value, content.שני);
+    let menuPrevented = false;
+    el('proposed').handlers.get('contextmenu')?.({ preventDefault() { menuPrevented = true; } });
+    assert.equal(menuPrevented, true, 'the native browser editor menu is prevented');
     assert.equal(el('toc-list').children[0].children[0].children[0].textContent, 'כותרת שני');
     assert.equal(el('empty').hidden, true);
 

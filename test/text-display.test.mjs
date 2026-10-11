@@ -4,6 +4,33 @@ import { projectNikud, applyDisplayEdit, readNikudDisplay } from '../plugin/text
 import { diffBook } from '../plugin/changes.js';
 import { prepareReports } from '../plugin/book-reports.js';
 
+test('reader whitespace is a display projection and preserves original report offsets', () => {
+  const source = '   שָׁלוֹם   בַּיִת  \n\t סוף\t\t כאן \t\n   ';
+  const map = projectNikud(source, true, true);
+  assert.equal(map.text, 'שלום בית\nסוף כאן\n');
+  for (let offset = 0; offset <= map.text.length; offset++) {
+    assert.equal(map.toDisplay(map.toSource(offset)), offset);
+  }
+  assert.equal(applyDisplayEdit(map, 0, map.text.length, map.text), source);
+  assert.equal(applyDisplayEdit(map, 0, map.text.length, 'שלום סית\nסוף כאן\n'),
+    '   שָׁלוֹם   סיִת  \n\t סוף\t\t כאן \t\n   ');
+  assert.equal(projectNikud('  א\u00a0\u00a0ב  ', false, true).text, 'א\u00a0\u00a0ב');
+  assert.equal(projectNikud(source, true).text, '   שלום   בית  \n\t סוף\t\t כאן \t\n   ');
+});
+
+test('typing a word separator survives later display projections', () => {
+  const original = '  שלום  \n  סוף  ';
+  let source = original;
+  let map = projectNikud(source, false, true, original);
+  source = applyDisplayEdit(map, 0, 4, 'שלום ');
+  map = projectNikud(source, false, true, original);
+  assert.equal(map.text, 'שלום \nסוף');
+  source = applyDisplayEdit(map, 0, 5, 'שלום עולם');
+  map = projectNikud(source, false, true, original);
+  assert.equal(map.text, 'שלום עולם\nסוף');
+  assert.equal(source, '  שלום   עולם\n  סוף  ');
+});
+
 test('hidden vowels map UTF-16 boundaries and leave punctuation and cantillation intact', () => {
   const source = '😀 שָׁלוֹם\nבַּיִת֑־סוֹףֽ׃';
   const map = projectNikud(source, true);

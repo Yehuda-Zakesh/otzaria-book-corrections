@@ -7,10 +7,29 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header class="topbar"><strong id="screen-title">תיקוני ספרים</strong><button id="change-book" type="button" class="icon-button" aria-label="פתח ספר נוסף" title="פתח ספר נוסף" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button><button id="send" type="submit" form="editor">שלח דיווח</button></header>
-  <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
+  <div class="tabbar-shell">
+    <strong id="screen-title" class="sr-only">תיקוני ספרים</strong>
+    <button id="nav-toggle" class="icon-button" type="button" aria-label="פתח או סגור ניווט" aria-expanded="true" title="ניווט"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button>
+    <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
+    <div class="tabbar-tools">
+      <button id="change-book" type="button" class="icon-button" aria-label="פתח ספר נוסף" title="פתח ספר נוסף" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+      <button id="send" type="submit" form="editor">שלח דיווח</button>
+      <details id="reader-menu"><summary class="icon-button" aria-label="פעולות נוספות" title="פעולות נוספות"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></summary><div class="reader-menu-items">
+        <button id="nav-pin" class="ghost" type="button" aria-pressed="false">נעץ ניווט</button>
+        <button id="personal-open" class="ghost" type="button">האזור האישי</button>
+        <button id="use-reader" class="ghost" type="button">השתמש כקורא באוצריא</button>
+        <button id="native-reader" class="ghost" type="button" hidden>קורא רגיל</button>
+        <div id="reader-settings" hidden><button id="font-smaller" class="ghost" type="button" aria-label="הקטן אות">א−</button><button id="font-larger" class="ghost" type="button" aria-label="הגדל אות">א+</button></div>
+      </div></details>
+    </div>
+  </div>
   <main>
     <p id="status" role="status" aria-live="polite">טוען…</p>
+    <section id="personal-area" hidden aria-labelledby="personal-title">
+      <div class="personal-toolbar"><h1 id="personal-title">התיקונים שלי</h1><button id="personal-scan" type="button">בדוק מול הספרייה</button><button id="personal-back" class="ghost" type="button">חזור לספר</button></div>
+      <p>הבדיקה משווה לספרייה המותקנת במחשב. התאמת נוסח אינה אישור שהדיווח התקבל על ידי צוות אוצריא. לאחר עדכון הספרייה אפשר לבדוק שוב.</p>
+      <div id="personal-list"></div>
+    </section>
     <section id="empty" hidden>
       <div class="library-toolbar">
         <label for="library-search" class="sr-only">איתור ספר או מחבר בספרייה</label>
