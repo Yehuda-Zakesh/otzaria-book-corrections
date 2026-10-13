@@ -63,19 +63,34 @@ export async function loadBook(call, identity, onProgress = () => {}, { signal, 
   const chunks = [];
   let offset = 0;
   for (;;) {
-    const chunk = await request(call, 'library.getBookContent', { ...bookIdentity, offset, limit: CHUNK_SIZE }, signal);
-    if (typeof chunk !== 'string' || chunk.length > CHUNK_SIZE) throw new Error('תוכן הספר שהתקבל אינו תקין.');
-    chunks.push(chunk);
-    offset += chunk.length;
-    if (offset > MAX_BOOK_BYTES) tooLarge();
+    // Start with one read so small books and the host cache are not loaded four
+    // times. Then overlap bounded batches; consume in source order, never in
+    // response order. Promise.all observes failures in every speculative read.
+    const batch = await Promise.all(Array.from({ length: offset ? 4 : 1 }, (_, i) =>
+      request(call, 'library.getBookContent', { ...bookIdentity, offset: offset + i * CHUNK_SIZE, limit: CHUNK_SIZE }, signal)));
+    let finished = false;
+    for (const chunk of batch) {
+      if (typeof chunk !== 'string' || chunk.length > CHUNK_SIZE) throw new Error('תוכן הספר שהתקבל אינו תקין.');
+      if (finished) continue;
+      chunks.push(chunk); offset += chunk.length;
+      if (offset > MAX_BOOK_BYTES) tooLarge();
+      finished = chunk.length < CHUNK_SIZE;
+    }
+    // Progress consumers update the UI. Report the completed batch once rather
+    // than repainting for each response already available in this same turn.
     onProgress({ phase: 'content', loaded: offset, total: null });
-    if (chunk.length < CHUNK_SIZE) break;
+    if (finished) break;
   }
   const raw = chunks.join('');
   if (bytes(raw) > MAX_BOOK_BYTES) tooLarge();
   const count = details.lineCount;
   if (!Number.isSafeInteger(count) || count < 1 || count > MAX_BOOK_BYTES) throw new Error('לא התקבל מספר פסקאות אמין; לא ניתן למפות דיווחים לספר.');
-  let lines = raw.split('\n').map(sourceText);
+  const rawLines = raw.split('\n');
+  // A file's terminating newline is not necessarily a DB paragraph. Only
+  // remove that one empty tail when the authoritative count excludes it;
+  // preserve real empty sections and confirm endpoint source maps below.
+  if (rawLines.length === count + 1 && rawLines.at(-1) === '') rawLines.pop();
+  let lines = rawLines.map(sourceText);
   const mapFor = index => request(call, 'reader.getSectionTextMap', { ...bookIdentity, sectionIndex: index, layer: 'source' }, signal);
   // A DB section may contain an embedded newline. A matching count plus source
   // checks guards the fast path; mismatches use authoritative section maps.
@@ -115,5 +130,5 @@ export async function loadBook(call, identity, onProgress = () => {}, { signal, 
   if (bytes(originalText) > MAX_BOOK_BYTES) tooLarge();
   onProgress({ phase: 'done', loaded: sections.length, total: sections.length });
   return { details, identity: bookIdentity, originalText, sections,
-    ...(includeRaw ? { rawLines: trusted ? raw.split('\n') : null } : {}) };
+    ...(includeRaw ? { rawLines: trusted ? rawLines : null } : {}) };
 }

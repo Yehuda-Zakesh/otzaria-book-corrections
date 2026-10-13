@@ -41,6 +41,11 @@ test('active heading comes from greatest eligible anchor, not monotone traversal
   const reordered = buildTocTree([{ text: 'later', index: 30, level: 1 }, { text: 'earlier', index: 5, level: 1 }]);
   assert.equal(activeTocKey(reordered, 40), 'i:30');
 });
+
+test('heading search shares Otzaria spelling and abbreviation matching', () => {
+  const tree = buildTocTree([{ text: 'חדושי הרשב״א', index: 0, level: 1 }, { text: 'פסקה', index: 1, level: 2 }]);
+  assert.deepEqual(flattenTocTree(tree, new Set(), 'חידושי רשבא').map(row => row.key), ['i:0', 'i:1']);
+});
 test('expand path and toggle all mutate the supplied Set', () => {
   const tree = buildTocTree(entries), state = new Set();
   assert.equal(ensurePathExpanded(tree, 'i:7', state), state);

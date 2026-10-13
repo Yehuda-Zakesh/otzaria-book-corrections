@@ -40,6 +40,7 @@ function reportSha256(text) {
   return hash.map(value => value.toString(16).padStart(8, '0')).join('');
 }
 
+const ENDPOINT = 'https://otzaria.org/api/reportingerrors';
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
 function canonical(value) {
@@ -157,16 +158,41 @@ async function buildReport(draft, email) {
   return payload;
 }
 
-// Otzaria sends the report itself (feedback.submitBookCorrection), so the plugin needs no network access.
-async function deliverReport(call, item) {
-  let result;
-  try { result = await call('feedback.submitBookCorrection', item.submission); }
-  catch (error) {
-    if (error.code === 'error.report_id_conflict') error.status = 409;
+// The 0.9.98-compatible release uses the SDK streaming network transport.
+async function sendReport(host, payload) {
+  let status = 0, body = '';
+  for await (const chunk of host.call('network.fetchStream', {
+    url: ENDPOINT, method: 'POST', timeoutMs: 30000,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' },
+    body: JSON.stringify(payload)
+  })) {
+    if (chunk.type === 'response') status = chunk.status;
+    if (chunk.type === 'data') body += chunk.body;
+    if (body.length > 65536) throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.');
+  }
+  if (status !== 200) {
+    const message = status === 409 ? 'מזהה הדיווח כבר שייך לתוכן אחר.' :
+      status === 429 ? 'נשלחו יותר מדי דיווחים. נסו שוב מאוחר יותר.' :
+      [400, 413, 422].includes(status) ? 'השרת דחה את הדיווח.' : 'השליחה לא הושלמה. נסו שוב.';
+    const error = new Error(`${message} התיקון נשמר.`);
+    error.status = status;
     throw error;
   }
-  if (result?.status !== 'sent') throw new Error('אוצריא לא אישרה את קבלת הדיווח. התיקון נשמר.');
-  return item.payload.report_kind === 'text_correction' && result.correctionSupported === true;
+  let response;
+  try { response = JSON.parse(body); } catch { throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.'); }
+  if (response?.success !== true) throw new Error('השרת לא אישר את קבלת הדיווח. התיקון נשמר.');
+  // Intake success does not imply email delivery. Retry with the same report ID:
+  // the server can retry its notification without creating another report.
+  if (response.email_sent === false && response.duplicate !== true) {
+    throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען. התיקון נשמר לניסיון חוזר.');
+  }
+  return response;
+}
+
+
+async function deliverReport(host, item) {
+  const response = await sendReport(host, item.payload);
+  return item.payload.report_kind === 'text_correction' && response.correction_supported === true;
 }
 
 function reportDeliveryMessage(queue) {
@@ -246,19 +272,34 @@ async function loadBook(call, identity, onProgress = () => {}, { signal, include
   const chunks = [];
   let offset = 0;
   for (;;) {
-    const chunk = await request(call, 'library.getBookContent', { ...bookIdentity, offset, limit: CHUNK_SIZE }, signal);
-    if (typeof chunk !== 'string' || chunk.length > CHUNK_SIZE) throw new Error('תוכן הספר שהתקבל אינו תקין.');
-    chunks.push(chunk);
-    offset += chunk.length;
-    if (offset > MAX_BOOK_BYTES) tooLarge();
+    // Start with one read so small books and the host cache are not loaded four
+    // times. Then overlap bounded batches; consume in source order, never in
+    // response order. Promise.all observes failures in every speculative read.
+    const batch = await Promise.all(Array.from({ length: offset ? 4 : 1 }, (_, i) =>
+      request(call, 'library.getBookContent', { ...bookIdentity, offset: offset + i * CHUNK_SIZE, limit: CHUNK_SIZE }, signal)));
+    let finished = false;
+    for (const chunk of batch) {
+      if (typeof chunk !== 'string' || chunk.length > CHUNK_SIZE) throw new Error('תוכן הספר שהתקבל אינו תקין.');
+      if (finished) continue;
+      chunks.push(chunk); offset += chunk.length;
+      if (offset > MAX_BOOK_BYTES) tooLarge();
+      finished = chunk.length < CHUNK_SIZE;
+    }
+    // Progress consumers update the UI. Report the completed batch once rather
+    // than repainting for each response already available in this same turn.
     onProgress({ phase: 'content', loaded: offset, total: null });
-    if (chunk.length < CHUNK_SIZE) break;
+    if (finished) break;
   }
   const raw = chunks.join('');
   if (bytes(raw) > MAX_BOOK_BYTES) tooLarge();
   const count = details.lineCount;
   if (!Number.isSafeInteger(count) || count < 1 || count > MAX_BOOK_BYTES) throw new Error('לא התקבל מספר פסקאות אמין; לא ניתן למפות דיווחים לספר.');
-  let lines = raw.split('\n').map(sourceText);
+  const rawLines = raw.split('\n');
+  // A file's terminating newline is not necessarily a DB paragraph. Only
+  // remove that one empty tail when the authoritative count excludes it;
+  // preserve real empty sections and confirm endpoint source maps below.
+  if (rawLines.length === count + 1 && rawLines.at(-1) === '') rawLines.pop();
+  let lines = rawLines.map(sourceText);
   const mapFor = index => request(call, 'reader.getSectionTextMap', { ...bookIdentity, sectionIndex: index, layer: 'source' }, signal);
   // A DB section may contain an embedded newline. A matching count plus source
   // checks guards the fast path; mismatches use authoritative section maps.
@@ -298,7 +339,7 @@ async function loadBook(call, identity, onProgress = () => {}, { signal, include
   if (bytes(originalText) > MAX_BOOK_BYTES) tooLarge();
   onProgress({ phase: 'done', loaded: sections.length, total: sections.length });
   return { details, identity: bookIdentity, originalText, sections,
-    ...(includeRaw ? { rawLines: trusted ? raw.split('\n') : null } : {}) };
+    ...(includeRaw ? { rawLines: trusted ? rawLines : null } : {}) };
 }
 
 
@@ -726,7 +767,8 @@ async function prepareReports(session, changes, email, call, idFactory, onProgre
           bookId: session.book.identity.bookId, sectionIndex: partFirst.index,
           currentRef: map.currentRef?.trim() || reportTocRef(session.book.toc, partFirst.index) }
       }, email);
-      // Otzaria fills the library build, heRef, DB book ID and full source path itself.
+      // Retain source snapshots and offsets for local history and source checks;
+      // the 0.9.98 compatibility sender transmits the immutable v2 payload.
       const partLast = sectionAt(session.book.sections, Math.max(partStart, partStart + original.length - 1));
       const localStart = partStart - partFirst.start;
       const submission = { reportId: payload.report_id, ...session.book.identity, sectionIndex: partFirst.index,
@@ -789,11 +831,11 @@ function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = ms => ne
       }
     } finally { pumping = false; }
   }
-  return (method, args = {}) => {
+  return (method, args = {}, { priority: foreground = false } = {}) => {
     // Content chunks are explicitly exempt in the host; section maps and writes are not.
     if (method === 'library.getBookContent') return invoke(method, args, false);
     return new Promise((resolve, reject) => {
-      const priority = method.startsWith('storage.') || method === 'ui.setUnsavedChanges';
+      const priority = foreground || method.startsWith('storage.') || method === 'ui.setUnsavedChanges';
       (priority ? urgent : normal).push({ method, args, resolve, reject });
       pump();
     });
@@ -877,10 +919,11 @@ function expandedState(expanded, key, depth) {
 function flattenTocTree(tree, expanded = null, query = '') {
   const needle = normalized(query), visible = new Set();
   if (needle) {
+    const matchesQuery = createSearchTextMatcher(query);
     function mark(nodes, matchedAncestor = false) {
       let any = false;
       for (const node of nodes) {
-        const matches = normalized(node.entry.text).includes(needle);
+        const matches = matchesQuery(node.entry.text);
         const childMatches = mark(node.children, matchedAncestor || matches);
         if (matchedAncestor || matches || childMatches) { visible.add(node); any = true; }
       }
@@ -944,6 +987,93 @@ const hebrewMarks = /[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7]/g;
 const markCode = code => (code >= 0x0591 && code <= 0x05bd) || code === 0x05bf || code === 0x05c1 || code === 0x05c2 || code === 0x05c4 || code === 0x05c5 || code === 0x05c7;
 const normalize = text => text.normalize('NFD').toLowerCase().replace(hebrewMarks, '');
 
+// Port of Otzaria lib/data/repository/data_repository.dart normalization,
+// _wordPairMatches and _editDistanceAtMost (UTF-16, identical typo budgets).
+function searchWords(value) {
+  const words = []; let chunks = [], chunk = '', offset = -1, end = 0;
+  const flush = () => { if (offset >= 0) words.push({ word: chunks.join('') + chunk, offset, end }); chunks = []; chunk = ''; offset = -1; };
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c >= 0x0591 && c <= 0x05c7) { if (c === 0x05be || c === 0x05c0) flush(); else if (offset >= 0) end = i + 1; continue; }
+    if (c === 0x22 || c === 0x27 || c === 0x05f3 || c === 0x05f4) { if (offset >= 0) end = i + 1; continue; }
+    if ((c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || (c >= 0x30 && c <= 0x39) || (c >= 0x0590 && c <= 0x05ff)) {
+      if (offset < 0) offset = i;
+      chunk += String.fromCharCode(c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+      if (chunk.length === 256) { chunks.push(chunk); chunk = ''; }
+      end = i + 1;
+    } else flush();
+  }
+  flush(); return words;
+}
+function searchWordMatches(query, word) {
+  if (word.includes(query)) return true;
+  if (query.length < 3) return false;
+  if (/(\u05d5\u05d5|\u05d9\u05d9)/.test(query + word) && word.replace(/\u05d5\u05d5/g, '\u05d5').replace(/\u05d9\u05d9/g, '\u05d9').includes(query.replace(/\u05d5\u05d5/g, '\u05d5').replace(/\u05d9\u05d9/g, '\u05d9'))) return true;
+  const length = Math.max(query.length, word.length);
+  const allowed = length <= 4 ? 0 : Math.min(4, Math.ceil(length / 4) - 1);
+  if (!allowed || Math.abs(query.length - word.length) > allowed) return false;
+  let previous2 = new Uint32Array(word.length + 1), previous = Uint32Array.from({ length: word.length + 1 }, (_, i) => i), row = new Uint32Array(word.length + 1), previousMin = 0;
+  for (let i = 1; i <= query.length; i++) {
+    row[0] = i; let rowMin = i;
+    for (let j = 1; j <= word.length; j++) {
+      const cost = query[i - 1] === word[j - 1] ? 0 : 1;
+      let best = Math.min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + cost);
+      if (i > 1 && j > 1 && query[i - 1] === word[j - 2] && query[i - 2] === word[j - 1]) best = Math.min(best, previous2[j - 2] + cost);
+      row[j] = best; rowMin = Math.min(rowMin, best);
+    }
+    if (rowMin > allowed && previousMin > allowed) return false;
+    const recycled = previous2; previous2 = previous; previous = row; row = recycled; previousMin = rowMin;
+  }
+  return previous[word.length] <= allowed;
+}
+function createSearchTextMatcher(query) {
+  const terms = searchWords(query).map(item => item.word);
+  if (!terms.length) return () => true;
+  const matches = new Map();
+  return text => {
+    const words = searchWords(text);
+    return terms.every(term => words.some(({ word }) => {
+      const key = term + '\0' + word;
+      if (!matches.has(key)) matches.set(key, searchWordMatches(term, word));
+      return matches.get(key);
+    }));
+  };
+}
+function matchesSearchText(text, query) { return createSearchTextMatcher(query)(text); }
+function tolerantQuery(query) { return /[א-ת]/.test(query) && /^[\u0591-\u05c7א-ת"'׳״‘’“”\s־-]+$/.test(query); }
+function findHebrewWords(text, query, limit, words) {
+  const terms = searchWords(query);
+  if (!terms.length) return [];
+  const results = [], matches = new Map();
+  const accepts = (term, word) => {
+    const key = term + '\0' + word;
+    if (!matches.has(key)) matches.set(key, searchWordMatches(term, word));
+    return matches.get(key);
+  };
+  for (let i = 0; i <= words.length - terms.length && results.length < limit; i++) {
+    if (!terms.every((term, j) => accepts(term.word, words[i + j].word))) continue;
+    // Exact containment highlights only the matching letters. Fuzzy spelling
+    // matches retain the complete original word (including nikud/quotes).
+    const boundary = (item, term, last) => {
+      const at = item.word.indexOf(term);
+      if (at < 0) return last ? item.end : item.offset;
+      const target = last ? at + term.length : at;
+      let normalizedOffset = 0;
+      for (let position = item.offset; position < item.end; position++) {
+        const c = text.charCodeAt(position);
+        if ((c >= 0x0591 && c <= 0x05c7) || c === 0x22 || c === 0x27 || c === 0x05f3 || c === 0x05f4) continue;
+        if (normalizedOffset === target) return position;
+        normalizedOffset++;
+      }
+      return item.end;
+    };
+    const offset = boundary(words[i], terms[0].word, false), end = boundary(words[i + terms.length - 1], terms.at(-1).word, true);
+    results.push({ offset, end, snippet: snippetFor(text, offset, end) });
+    i += terms.length - 1;
+  }
+  return results;
+}
+
 function snippetFor(text, start, end) {
   let leftStart = Math.max(0, start - 120), rightEnd = Math.min(text.length, end + 120);
   if (leftStart > 0 && /[\uDC00-\uDFFF]/.test(text[leftStart])) leftStart--;
@@ -955,16 +1085,18 @@ function snippetFor(text, start, end) {
   return (start > left.length ? '…' : '') + left + middleDisplay + right + (end + right.length < text.length ? '…' : '');
 }
 
-/** Literal search in edited text; public offsets refer to the original UTF-16
- * string passed here. Nikud/cantillation are ignored, whitespace stays exact. */
+/** Search edited text using host word normalization and typo matching for Hebrew
+ * queries; other queries remain literal. Results refer to original UTF-16 ranges. */
 function createBookSearch() {
-  let cachedText, normalizedText;
+  let cachedText, normalizedText, words;
   const search = (text, query, options = {}) => {
     if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
-    if (text !== cachedText) { cachedText = text; normalizedText = normalize(text); }
-    return findInBook(text, query, { ...options, normalizedText });
+    if (text !== cachedText) { cachedText = text; normalizedText = undefined; words = undefined; }
+    if (tolerantQuery(query)) words ??= searchWords(text);
+    else normalizedText ??= normalize(text);
+    return findInBook(text, query, { ...options, normalizedText, words });
   };
-  search.clear = () => { cachedText = undefined; normalizedText = undefined; };
+  search.clear = () => { cachedText = undefined; normalizedText = undefined; words = undefined; };
   return search;
 }
 
@@ -984,6 +1116,7 @@ function createAsyncBookSearch({ threshold = 250000, workerFactory } = {}) {
   }
   function makeWorker() {
     const source = `const hebrewMarks = ${hebrewMarks}; const markCode = ${markCode}; const normalize = ${normalize};
+      ${searchWords} ${searchWordMatches} ${tolerantQuery} ${findHebrewWords}
       ${snippetFor} ${findInBook} ${createBookSearch}
       const search = createBookSearch(); let text;
       self.onmessage = ({data}) => {
@@ -1028,9 +1161,10 @@ function createAsyncBookSearch({ threshold = 250000, workerFactory } = {}) {
   return search;
 }
 
-function findInBook(text, query, { limit = 200, normalizedText } = {}) {
+function findInBook(text, query, { limit = 200, normalizedText, words } = {}) {
   if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
   if (!Number.isFinite(limit) || limit <= 0 || !query.trim()) return [];
+  if (tolerantQuery(query)) return findHebrewWords(text, query, Math.floor(limit), words ?? searchWords(text));
   const needle = normalize(query);
   if (!needle.trim()) return [];
   const haystack = normalizedText ?? normalize(text), matches = [];
@@ -1125,7 +1259,7 @@ function createContinuousEditor(viewport, canvas, editor, onPosition) {
     while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (segments[mid].start <= offset) lo = mid; else hi = mid - 1; }
     return lo;
   }
-  function mount(index, force = false) {
+  function mount(index, force = false, fromScroll = false) {
     const nextFirst = Math.max(0, index - 1), nextLast = Math.min(segments.length - 1, index + 1);
     if (!force && first === nextFirst && last === nextLast && editor.value === text.slice(range.start, range.end)) return;
     const anchorY = viewport.scrollTop - tops[index];
@@ -1159,7 +1293,13 @@ function createContinuousEditor(viewport, canvas, editor, onPosition) {
     editor.style.height = `${height}px`;
     editor.scrollTop = 0;
     mirror.remove();
-    viewport.scrollTop = Math.max(0, tops[index] + anchorY);
+    // Estimates (including restored geometry) can be much taller than the
+    // measured paragraph. Keeping an absolute anchor beyond its new height
+    // scrolls past all three mounted segments and leaves a blank viewport.
+    // Editing/navigation can intentionally keep a viewport above the caret's
+    // segment. Clamp only scroll-driven refinement, where index came from y.
+    const measuredAnchor = fromScroll ? Math.min(anchorY, heights[index] - lineHeight) : anchorY;
+    viewport.scrollTop = Math.max(0, tops[index] + measuredAnchor);
   }
   function setText(value, offset = 0, savedGeometry = null) {
     const previousText = text, previousWidth = width, previousLineHeight = lineHeight;
@@ -1202,7 +1342,7 @@ function createContinuousEditor(viewport, canvas, editor, onPosition) {
       programmaticTop = null;
       const y = viewport.scrollTop - padding;
       const index = indexAtHeight(Math.max(0, y));
-      mount(index);
+      mount(index, false, true);
       onPosition(visibleOffset());
     });
   }, { passive: true });
@@ -1499,10 +1639,12 @@ let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
+const foregroundCall = (method, args) => call(method, args, { priority: true });
 let draftStorage = createDraftStorage(call, newId);
 const sourceGuard = createSourceGuard(call), personalHistory = createPersonalHistory(call);
-let embeddedReader = null, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
+let embeddedReader = null, textReaderAvailable = false, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
 let locationTimer, lastReportedIndex = null, navigationOpen = true, navigationPinned = false;
+let pendingBookRequests = 0;
 const searchBook = createAsyncBookSearch();
 function applyReaderDisplay(display) {
   if (!display) return;
@@ -1564,6 +1706,7 @@ el('proposed').addEventListener('keydown', event => {
   if (!embeddedReader && !navigationPinned && ['PageDown', 'PageUp'].includes(event.key)) setNavigation(false);
 });
 el('use-reader').addEventListener('click', async () => {
+  if (!textReaderAvailable) return;
   try {
     await call('reader.setDefaultTextReader', { enabled: true });
     if (session) await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0 });
@@ -1714,7 +1857,7 @@ function controls() {
   el('proposed').readOnly = locked || !!hasPartialDelivery();
   el('send').hidden = !session || chooserOpen || personalOpen;
   el('change-book').hidden = !!embeddedReader || personalOpen;
-  el('use-reader').hidden = !!embeddedReader;
+  el('use-reader').hidden = !!embeddedReader || !textReaderAvailable;
   el('native-reader').hidden = !embeddedReader;
   el('nav-toggle').hidden = !!embeddedReader || !session || chooserOpen || personalOpen;
   el('nav-pin').hidden = el('nav-toggle').hidden;
@@ -1831,6 +1974,7 @@ async function activateBook(id, focusTab = false) {
   }
   if (focusTab) el(`book-tab-${id}`).focus();
   else el('proposed').focus({ preventScroll: true });
+  refreshActiveDisplay().catch(error => message(error.message, true));
 }
 async function closeBook(id) {
   if (loading || sending) return;
@@ -2074,7 +2218,7 @@ function identityFrom(event) {
   if (typeof bookId !== 'string' || !bookId) throw new Error('לא נמצא ספר פתוח. פתחו ספר טקסט ובחרו „העבר את הספר לתיקון”.');
   return { bookId, ...(data.bookUid ? { bookUid: data.bookUid } : id != null ? { bookUid: `id:${id}` } : {}), location: readerPosition(event) };
 }
-async function openBook(identity) {
+async function openBook(identity, { focusLocation = false } = {}) {
   if (loading || sending) throw new Error('המתינו לסיום הפעולה הנוכחית.');
   loading = true; controls();
   try {
@@ -2083,13 +2227,20 @@ async function openBook(identity) {
     const { location, ...bookIdentity } = identity;
     const existing = sessions.find(item => item.book.identity.bookId === bookIdentity.bookId && item.book.identity.bookUid === bookIdentity.bookUid);
     if (existing) {
-      await updateNikudDisplay(existing);
-      await persist(existing); finishLibraryTab(); session = existing; chooserOpen = false; render(); restoreView(); message(); scheduleSave(); return;
+      await Promise.all([
+        !existing.book.toc?.length ? foregroundCall('library.getBookToc', existing.book.identity).catch(() => []).then(toc => { existing.book.toc = toc; }) : null,
+        updateNikudDisplay(existing, foregroundCall)
+      ]);
+      await persist(existing); finishLibraryTab(); session = existing; chooserOpen = false; render(); restoreView();
+      if (focusLocation && location) navigateTo(location);
+      message(); scheduleSave(); return;
     }
-    const book = await loadBook(call, bookIdentity, progress => message(progress.phase === 'content'
+    const book = await loadBook(foregroundCall, bookIdentity, progress => message(progress.phase === 'content'
       ? `טוען את הספר… ${Math.round(progress.loaded / 1000)} אלפי תווים` : `ממפה פסקאות… ${progress.loaded} מתוך ${progress.total}`));
-    book.toc = await call('library.getBookToc', book.identity).catch(() => []);
-    const hideNikud = await readNikudDisplay(call, book);
+    const [toc, hideNikud] = await Promise.all([
+      foregroundCall('library.getBookToc', book.identity).catch(() => []), readNikudDisplay(foregroundCall, book)
+    ]);
+    book.toc = toc;
     const next = { id: newId(), book, hideNikud, editedText: book.originalText, queue: null, completed: false, location: location ?? { sectionIndex: 0, offset: 0 } };
     await persist(next); finishLibraryTab(); session = next; chooserOpen = false; render(); restoreView(); message(); scheduleSave();
     loading = false; controls();
@@ -2104,13 +2255,14 @@ const initializationStarted = new Promise(resolve => { startInitialization = res
 let openings = Promise.resolve();
 function requestBook(event) {
   if (!['correct-book', 'correct-selection'].includes(event.itemId)) return;
+  pendingBookRequests++;
   openings = openings.catch(() => {}).then(async () => {
     await initializationStarted;
     await initialized;
     if (embeddedReader) return;
     const identity = identityFrom(event);
-    await openBook(identity);
-  }).catch(error => message(error.message, true));
+    await openBook(identity, { focusLocation: true });
+  }).catch(error => message(error.message, true)).finally(() => { pendingBookRequests--; });
 }
 function requestLibrary() {
   openings = openings.catch(() => {}).then(async () => {
@@ -2187,6 +2339,7 @@ function updateLibraryGeometry() {
 }
 function renderLibrary() {
   const query = normalizeLibraryQuery(el('library-search').value);
+  const matchesLibraryQuery = createSearchTextMatcher(el('library-search').value);
   const chain = libraryChain(libraryTree, libraryPath) ?? (libraryTree ? [libraryTree] : []);
   const current = chain.at(-1);
   const breadcrumbs = chain.map((category, index) => {
@@ -2198,7 +2351,7 @@ function renderLibrary() {
   el('library-breadcrumbs').replaceChildren(...breadcrumbs);
   el('library-search').placeholder = 'איתור ספר או מחבר ב' + (current?.title ?? 'ספריית אוצריא');
   const groups = [];
-  const bookMatches = book => normalizeLibraryQuery((book.title ?? book.bookId) + ' ' + (book.author ?? '')).includes(query);
+  const bookMatches = book => matchesLibraryQuery((book.title ?? book.bookId) + ' ' + (book.author ?? ''));
   function card(entry, folder, action) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'library-card';
     button.title = entry.title ?? entry.bookId;
@@ -2250,7 +2403,7 @@ function renderLibrary() {
     }
     function collect(node) {
       for (const category of node.categories ?? []) {
-        if (!query || normalizeLibraryQuery(category.title).includes(query)) add(category, true);
+        if (!query || matchesLibraryQuery(category.title)) add(category, true);
         if (query) collect(category);
       }
       for (const book of node.books ?? []) if (!query || bookMatches(book)) add(book, false);
@@ -2330,8 +2483,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     const sourceBook = await sourceGuard.check(session.book, queuedSourceSections(session));
     verifyQueuedCorrectionSources(session.queue, sourceBook);
-    // Queues prepared before reports went through Otzaria have no submission; rebuild them from the draft.
-    if (session.queue?.some(item => !item.sent && !item.submission)) session.queue = null;
+    // Direct reporting reuses immutable payloads from both legacy and newer
+    // queues. Never replace IDs or resend acknowledged items on an upgrade.
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -2348,10 +2501,12 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        item.correctionSupported = await deliverReport(call, item);
+        item.correctionSupported = await deliverReport(host, item);
       } catch (error) {
         if (error.status === 409) {
-          item.payload.report_id = newId(); item.submission.reportId = item.payload.report_id; await persist();
+          item.payload.report_id = newId();
+          if (item.submission) item.submission.reportId = item.payload.report_id;
+          await persist();
         }
         throw error;
       }
@@ -2384,7 +2539,12 @@ async function initialize(boot) {
   }
   applyTheme(boot?.theme);
   const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
-    call('settings.get', { key: 'key-library-view-mode' })]);
+    call('settings.get', { key: 'key-library-view-mode' }), call('app.getInfo')]);
+  const versionParts = results[3].status === 'fulfilled' ? /^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\+.*)?$/.exec(results[3].value?.version ?? '') : null;
+  // The released 0.9.98+801 has no plugin reader API. A newer app version or
+  // an explicit embedded boot supplied by a patched host proves support.
+  textReaderAvailable = !!embeddedReader || !!versionParts &&
+    (Number(versionParts[1]) > 0 || Number(versionParts[2]) > 9 || Number(versionParts[2]) === 9 && Number(versionParts[3]) >= 99);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
   if (results[2].status === 'fulfilled') libraryMode = results[2].value === 'list' ? 'tree' : 'grid';
@@ -2406,22 +2566,30 @@ async function initialize(boot) {
     message();
     return;
   }
-  for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
-  for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
-  for (const item of sessions) sourceGuard.restore(item.book);
+  // Core restoration must finish before optional library/metadata work. A
+  // queued reader click needs only its source book, not the entire catalogue
+  // or display maps for unrelated drafts. Submit still verifies every source.
+  const restoredSession = session;
+  if (restoredSession) setTimeout(() => {
+    if (session === restoredSession && !loading && !pendingBookRequests) refreshActiveDisplay().catch(error => message(error.message, true));
+  }, 0);
   if (!session) {
     message('טוען את הספרייה…');
-    libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));
-    if (chooserOpen) restoreView(); else renderLibrary();
     el('library-search').focus();
-  } else {
-    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(filterLibraryTree(tree)); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
   }
-  message(results[2].status === 'rejected' ? librarySettingsPermissionMessage : '', results[2].status === 'rejected');
+  call('library.getTree', { includeBooks: true }).then(tree => {
+    libraryTree = sortLibraryTree(filterLibraryTree(tree));
+    if (!loading && !pendingBookRequests && (chooserOpen || !session)) {
+      if (chooserOpen) restoreView(); else renderLibrary();
+    }
+    if (statusText === 'טוען את הספרייה…') message();
+  }).catch(error => { if (!loading && (chooserOpen || !session)) message(error.message, true); });
+  if (results[2].status === 'rejected') message(librarySettingsPermissionMessage, true);
+  else if (session) message();
 }
-async function updateNikudDisplay(item) {
-  const hidden = await readNikudDisplay(call, item.book).catch(() => item.hideNikud ?? false);
+async function updateNikudDisplay(item, request = call) {
+  const hidden = await readNikudDisplay(request, item.book).catch(() => item.hideNikud ?? false);
   if (hidden === !!item.hideNikud) return false;
   item.hideNikud = hidden;
   if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
@@ -2432,16 +2600,22 @@ async function refreshActiveDisplay() {
   if (!session || chooserOpen || loading || sending) return;
   const item = session;
   captureView();
-  if (await updateNikudDisplay(item) && item === session && !chooserOpen && !loading && !sending) {
+  const [toc, displayChanged] = await Promise.all([
+    !item.book.toc?.length ? call('library.getBookToc', item.book.identity).catch(() => []) : null,
+    updateNikudDisplay(item)
+  ]);
+  if (toc !== null) item.book.toc = toc;
+  if ((displayChanged || toc !== null) && item === session && !chooserOpen && !loading && !sending) {
     // Capture again after the RPC: editing may have continued while it ran.
     captureView();
-    if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
+    if (displayChanged && item.view) { delete item.view.geometry; delete item.view.scrollTop; }
     render(); restoreView(); scheduleSave();
   }
   initializeVisibleEditor();
 }
 if (host) {
   host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook);
+  host.on('reader.toolbar_item_clicked', requestBook);
   host.on('settings.changed', event => { if (event.key === 'key-library-view-mode') applyLibraryMode(event.newValue); });
   host.on('plugin.permissions_changed', event => {
     if (event.permissions?.includes('settings.read')) initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));

@@ -1,4 +1,5 @@
 import { reportSha256 } from './report-digest.js';
+export const ENDPOINT = 'https://otzaria.org/api/reportingerrors';
 const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
 export function canonical(value) {
@@ -116,16 +117,41 @@ export async function buildReport(draft, email) {
   return payload;
 }
 
-// Otzaria sends the report itself (feedback.submitBookCorrection), so the plugin needs no network access.
-export async function deliverReport(call, item) {
-  let result;
-  try { result = await call('feedback.submitBookCorrection', item.submission); }
-  catch (error) {
-    if (error.code === 'error.report_id_conflict') error.status = 409;
+// The 0.9.98-compatible release uses the SDK streaming network transport.
+export async function sendReport(host, payload) {
+  let status = 0, body = '';
+  for await (const chunk of host.call('network.fetchStream', {
+    url: ENDPOINT, method: 'POST', timeoutMs: 30000,
+    headers: { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' },
+    body: JSON.stringify(payload)
+  })) {
+    if (chunk.type === 'response') status = chunk.status;
+    if (chunk.type === 'data') body += chunk.body;
+    if (body.length > 65536) throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.');
+  }
+  if (status !== 200) {
+    const message = status === 409 ? 'מזהה הדיווח כבר שייך לתוכן אחר.' :
+      status === 429 ? 'נשלחו יותר מדי דיווחים. נסו שוב מאוחר יותר.' :
+      [400, 413, 422].includes(status) ? 'השרת דחה את הדיווח.' : 'השליחה לא הושלמה. נסו שוב.';
+    const error = new Error(`${message} התיקון נשמר.`);
+    error.status = status;
     throw error;
   }
-  if (result?.status !== 'sent') throw new Error('אוצריא לא אישרה את קבלת הדיווח. התיקון נשמר.');
-  return item.payload.report_kind === 'text_correction' && result.correctionSupported === true;
+  let response;
+  try { response = JSON.parse(body); } catch { throw new Error('התקבלה תשובה לא תקינה מהשרת. התיקון נשמר לניסיון חוזר.'); }
+  if (response?.success !== true) throw new Error('השרת לא אישר את קבלת הדיווח. התיקון נשמר.');
+  // Intake success does not imply email delivery. Retry with the same report ID:
+  // the server can retry its notification without creating another report.
+  if (response.email_sent === false && response.duplicate !== true) {
+    throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען. התיקון נשמר לניסיון חוזר.');
+  }
+  return response;
+}
+
+
+export async function deliverReport(host, item) {
+  const response = await sendReport(host, item.payload);
+  return item.payload.report_kind === 'text_correction' && response.correction_supported === true;
 }
 
 export function reportDeliveryMessage(queue) {

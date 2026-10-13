@@ -1,3 +1,4 @@
+import { createSearchTextMatcher } from './book-search.js';
 const normalized = value => String(value ?? '').normalize('NFD').replace(/[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7]/g, '').toLocaleLowerCase().trim();
 
 /** Preserve the reader's heading order and levels, including skipped levels. */
@@ -25,10 +26,11 @@ function expandedState(expanded, key, depth) {
 export function flattenTocTree(tree, expanded = null, query = '') {
   const needle = normalized(query), visible = new Set();
   if (needle) {
+    const matchesQuery = createSearchTextMatcher(query);
     function mark(nodes, matchedAncestor = false) {
       let any = false;
       for (const node of nodes) {
-        const matches = normalized(node.entry.text).includes(needle);
+        const matches = matchesQuery(node.entry.text);
         const childMatches = mark(node.children, matchedAncestor || matches);
         if (matchedAncestor || matches || childMatches) { visible.add(node); any = true; }
       }

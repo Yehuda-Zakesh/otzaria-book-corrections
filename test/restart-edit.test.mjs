@@ -21,8 +21,8 @@ test('a restored failed submission remains editable and changed text replaces on
     const el = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
     globalThis.document = {getElementById:el,createElement:()=>new Element(),querySelector:()=>el('main'),documentElement:{style:{setProperty(){}}}};
     globalThis.window = { Otzaria: { _booted:true, on(){}, call(method,args={}) {
-      if (method === 'feedback.submitBookCorrection') {
-        requests.push(structuredClone(args)); return Promise.resolve({success:false,error:{message:'Network unavailable'}});
+      if (method === 'network.fetchStream') {
+        requests.push(JSON.parse(args.body)); return (async function* () { throw new Error('Network unavailable'); })();
       }
       let data = null;
       if (method === 'storage.get') data = structuredClone(storage.get(args.key));
@@ -39,7 +39,14 @@ test('a restored failed submission remains editable and changed text replaces on
     } } };
     return el;
   }
-  const settle = () => new Promise(resolve=>setTimeout(resolve,150));
+  const waitFor = async (predicate, label) => {
+    for (let attempt = 0; attempt < 300; attempt++) {
+      if (predicate()) return;
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.fail(`Timed out: ${label}`);
+  };
+  const settle = () => waitFor(() => el('proposed').value !== '' && el('status').textContent === '', 'restored editor finishes initialization');
   const saved = () => { const w=storedWorkspace(storage);return w.sessions.find(s=>s.id===w.activeId); };
   let el = setup();
   try {
@@ -56,18 +63,20 @@ test('a restored failed submission remains editable and changed text replaces on
     el('proposed').value = edited; el('proposed').fire('input');
     await el('editor').fire('submit');
     assert.deepEqual(requests[2],requests[0],'input without a text change must also preserve the retry ID');
-    el('proposed').value = 'אה\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));
+    el('proposed').value = 'אה\nגד'; el('proposed').fire('input');
+    await waitFor(() => saved().editedText === 'אה\nגד' && saved().queue === null && el('draft-status').textContent === 'הטיוטה נשמרה', 'changed failed draft is saved');
     assert.equal(saved().editedText,'אה\nגד'); assert.equal(saved().queue,null);
     await el('editor').fire('submit');
-    assert.notEqual(requests[3].reportId,requests[0].reportId);
-    assert.equal(requests[3].proposed,'ה');
+    assert.notEqual(requests[3].report_id,requests[0].report_id);
+    assert.match(requests[3].error_details,/מוצע: ה/);
     // A crash after the last acknowledgment but before completed=true cannot lock the restored book.
     const workspace=storage.get('book-session');
     const draft = storage.get(workspace.sessions[0].draftKey);
     draft.queue.forEach(item=>{item.sent=true;}); draft.completed=false;
     el = setup(); await import('../plugin/app.js?acknowledged-edit-restart'); await settle();
     assert.equal(el('proposed').readOnly,false); assert.equal(el('send').disabled,true);
-    el('proposed').value='את\nגד'; el('proposed').fire('input'); await new Promise(resolve=>setTimeout(resolve,550));
+    el('proposed').value='את\nגד'; el('proposed').fire('input');
+    await waitFor(() => saved().editedText === 'את\nגד' && saved().reportedText === 'אה\nגד' && el('draft-status').textContent === 'הטיוטה נשמרה', 'acknowledged baseline is saved');
     assert.equal(saved().reportedText,'אה\nגד','acknowledged wording remains the baseline for later edits');
   } finally { delete globalThis.document;delete globalThis.window; }
 });

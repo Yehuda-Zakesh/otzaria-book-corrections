@@ -60,3 +60,18 @@ test('retry starts share spacing with concurrent calls and exhausted retries ret
   assert.equal(starts.length, 14);
   assert.ok(starts.slice(1).every((time, i) => time - starts[i] >= 20));
 });
+
+test('a foreground book read can start while unrelated background reads are stalled', async () => {
+  const starts = [], release = [];
+  const call = createRpcCall({ call(method) {
+    starts.push(method);
+    if (method === 'library.getTree') return new Promise(resolve => release.push(() => resolve({ success: true, data: null })));
+    return Promise.resolve({ success: true, data: 'requested book' });
+  } }, { sleep: async () => {} });
+  const background = Array.from({ length: 3 }, () => call('library.getTree'));
+  const foreground = call('library.getBookDetails', {}, { priority: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(starts.includes('library.getBookDetails'), 'foreground book must not wait for unrelated trees');
+  assert.equal(await foreground, 'requested book');
+  release.forEach(resolve => resolve()); await Promise.all(background);
+});

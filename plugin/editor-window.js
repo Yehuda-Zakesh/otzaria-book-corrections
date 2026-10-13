@@ -59,7 +59,7 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
     while (lo < hi) { const mid = Math.ceil((lo + hi) / 2); if (segments[mid].start <= offset) lo = mid; else hi = mid - 1; }
     return lo;
   }
-  function mount(index, force = false) {
+  function mount(index, force = false, fromScroll = false) {
     const nextFirst = Math.max(0, index - 1), nextLast = Math.min(segments.length - 1, index + 1);
     if (!force && first === nextFirst && last === nextLast && editor.value === text.slice(range.start, range.end)) return;
     const anchorY = viewport.scrollTop - tops[index];
@@ -93,7 +93,13 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
     editor.style.height = `${height}px`;
     editor.scrollTop = 0;
     mirror.remove();
-    viewport.scrollTop = Math.max(0, tops[index] + anchorY);
+    // Estimates (including restored geometry) can be much taller than the
+    // measured paragraph. Keeping an absolute anchor beyond its new height
+    // scrolls past all three mounted segments and leaves a blank viewport.
+    // Editing/navigation can intentionally keep a viewport above the caret's
+    // segment. Clamp only scroll-driven refinement, where index came from y.
+    const measuredAnchor = fromScroll ? Math.min(anchorY, heights[index] - lineHeight) : anchorY;
+    viewport.scrollTop = Math.max(0, tops[index] + measuredAnchor);
   }
   function setText(value, offset = 0, savedGeometry = null) {
     const previousText = text, previousWidth = width, previousLineHeight = lineHeight;
@@ -136,7 +142,7 @@ export function createContinuousEditor(viewport, canvas, editor, onPosition) {
       programmaticTop = null;
       const y = viewport.scrollTop - padding;
       const index = indexAtHeight(Math.max(0, y));
-      mount(index);
+      mount(index, false, true);
       onPosition(visibleOffset());
     });
   }, { passive: true });

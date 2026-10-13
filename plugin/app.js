@@ -7,7 +7,7 @@ import { verifyQueuedCorrectionSources } from './correction-source.js';
 import { prepareReports } from './book-reports.js';
 import { createRpcCall } from './rpc.js';
 import { readerPosition, positionInBook, originalToEditedOffset } from './navigation.js';
-import { createAsyncBookSearch } from './book-search.js';
+import { createAsyncBookSearch, createSearchTextMatcher } from './book-search.js';
 import { createDraftStorage } from './draft-storage.js';
 import { createSourceGuard } from './source-guard.js';
 import { editorRange, createContinuousEditor } from './editor-window.js';
@@ -33,10 +33,12 @@ let displayProjection = projectNikud('');
 let selectedRow = null, selectedKey = null;
 let statusText = '', statusError = false, statusTimer;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
+const foregroundCall = (method, args) => call(method, args, { priority: true });
 let draftStorage = createDraftStorage(call, newId);
 const sourceGuard = createSourceGuard(call), personalHistory = createPersonalHistory(call);
-let embeddedReader = null, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
+let embeddedReader = null, textReaderAvailable = false, personalOpen = false, historyItems = [], scanning = false, savedReaderDrafts = [];
 let locationTimer, lastReportedIndex = null, navigationOpen = true, navigationPinned = false;
+let pendingBookRequests = 0;
 const searchBook = createAsyncBookSearch();
 function applyReaderDisplay(display) {
   if (!display) return;
@@ -98,6 +100,7 @@ el('proposed').addEventListener('keydown', event => {
   if (!embeddedReader && !navigationPinned && ['PageDown', 'PageUp'].includes(event.key)) setNavigation(false);
 });
 el('use-reader').addEventListener('click', async () => {
+  if (!textReaderAvailable) return;
   try {
     await call('reader.setDefaultTextReader', { enabled: true });
     if (session) await call('reader.openBook', { ...session.book.identity, index: session.location?.sectionIndex ?? 0 });
@@ -248,7 +251,7 @@ function controls() {
   el('proposed').readOnly = locked || !!hasPartialDelivery();
   el('send').hidden = !session || chooserOpen || personalOpen;
   el('change-book').hidden = !!embeddedReader || personalOpen;
-  el('use-reader').hidden = !!embeddedReader;
+  el('use-reader').hidden = !!embeddedReader || !textReaderAvailable;
   el('native-reader').hidden = !embeddedReader;
   el('nav-toggle').hidden = !!embeddedReader || !session || chooserOpen || personalOpen;
   el('nav-pin').hidden = el('nav-toggle').hidden;
@@ -365,6 +368,7 @@ async function activateBook(id, focusTab = false) {
   }
   if (focusTab) el(`book-tab-${id}`).focus();
   else el('proposed').focus({ preventScroll: true });
+  refreshActiveDisplay().catch(error => message(error.message, true));
 }
 async function closeBook(id) {
   if (loading || sending) return;
@@ -608,7 +612,7 @@ function identityFrom(event) {
   if (typeof bookId !== 'string' || !bookId) throw new Error('לא נמצא ספר פתוח. פתחו ספר טקסט ובחרו „העבר את הספר לתיקון”.');
   return { bookId, ...(data.bookUid ? { bookUid: data.bookUid } : id != null ? { bookUid: `id:${id}` } : {}), location: readerPosition(event) };
 }
-async function openBook(identity) {
+async function openBook(identity, { focusLocation = false } = {}) {
   if (loading || sending) throw new Error('המתינו לסיום הפעולה הנוכחית.');
   loading = true; controls();
   try {
@@ -617,13 +621,20 @@ async function openBook(identity) {
     const { location, ...bookIdentity } = identity;
     const existing = sessions.find(item => item.book.identity.bookId === bookIdentity.bookId && item.book.identity.bookUid === bookIdentity.bookUid);
     if (existing) {
-      await updateNikudDisplay(existing);
-      await persist(existing); finishLibraryTab(); session = existing; chooserOpen = false; render(); restoreView(); message(); scheduleSave(); return;
+      await Promise.all([
+        !existing.book.toc?.length ? foregroundCall('library.getBookToc', existing.book.identity).catch(() => []).then(toc => { existing.book.toc = toc; }) : null,
+        updateNikudDisplay(existing, foregroundCall)
+      ]);
+      await persist(existing); finishLibraryTab(); session = existing; chooserOpen = false; render(); restoreView();
+      if (focusLocation && location) navigateTo(location);
+      message(); scheduleSave(); return;
     }
-    const book = await loadBook(call, bookIdentity, progress => message(progress.phase === 'content'
+    const book = await loadBook(foregroundCall, bookIdentity, progress => message(progress.phase === 'content'
       ? `טוען את הספר… ${Math.round(progress.loaded / 1000)} אלפי תווים` : `ממפה פסקאות… ${progress.loaded} מתוך ${progress.total}`));
-    book.toc = await call('library.getBookToc', book.identity).catch(() => []);
-    const hideNikud = await readNikudDisplay(call, book);
+    const [toc, hideNikud] = await Promise.all([
+      foregroundCall('library.getBookToc', book.identity).catch(() => []), readNikudDisplay(foregroundCall, book)
+    ]);
+    book.toc = toc;
     const next = { id: newId(), book, hideNikud, editedText: book.originalText, queue: null, completed: false, location: location ?? { sectionIndex: 0, offset: 0 } };
     await persist(next); finishLibraryTab(); session = next; chooserOpen = false; render(); restoreView(); message(); scheduleSave();
     loading = false; controls();
@@ -638,13 +649,14 @@ const initializationStarted = new Promise(resolve => { startInitialization = res
 let openings = Promise.resolve();
 function requestBook(event) {
   if (!['correct-book', 'correct-selection'].includes(event.itemId)) return;
+  pendingBookRequests++;
   openings = openings.catch(() => {}).then(async () => {
     await initializationStarted;
     await initialized;
     if (embeddedReader) return;
     const identity = identityFrom(event);
-    await openBook(identity);
-  }).catch(error => message(error.message, true));
+    await openBook(identity, { focusLocation: true });
+  }).catch(error => message(error.message, true)).finally(() => { pendingBookRequests--; });
 }
 function requestLibrary() {
   openings = openings.catch(() => {}).then(async () => {
@@ -721,6 +733,7 @@ function updateLibraryGeometry() {
 }
 function renderLibrary() {
   const query = normalizeLibraryQuery(el('library-search').value);
+  const matchesLibraryQuery = createSearchTextMatcher(el('library-search').value);
   const chain = libraryChain(libraryTree, libraryPath) ?? (libraryTree ? [libraryTree] : []);
   const current = chain.at(-1);
   const breadcrumbs = chain.map((category, index) => {
@@ -732,7 +745,7 @@ function renderLibrary() {
   el('library-breadcrumbs').replaceChildren(...breadcrumbs);
   el('library-search').placeholder = 'איתור ספר או מחבר ב' + (current?.title ?? 'ספריית אוצריא');
   const groups = [];
-  const bookMatches = book => normalizeLibraryQuery((book.title ?? book.bookId) + ' ' + (book.author ?? '')).includes(query);
+  const bookMatches = book => matchesLibraryQuery((book.title ?? book.bookId) + ' ' + (book.author ?? ''));
   function card(entry, folder, action) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'library-card';
     button.title = entry.title ?? entry.bookId;
@@ -784,7 +797,7 @@ function renderLibrary() {
     }
     function collect(node) {
       for (const category of node.categories ?? []) {
-        if (!query || normalizeLibraryQuery(category.title).includes(query)) add(category, true);
+        if (!query || matchesLibraryQuery(category.title)) add(category, true);
         if (query) collect(category);
       }
       for (const book of node.books ?? []) if (!query || bookMatches(book)) add(book, false);
@@ -864,8 +877,8 @@ el('editor').addEventListener('submit', async event => {
     await persist();
     const sourceBook = await sourceGuard.check(session.book, queuedSourceSections(session));
     verifyQueuedCorrectionSources(session.queue, sourceBook);
-    // Queues prepared before reports went through Otzaria have no submission; rebuild them from the draft.
-    if (session.queue?.some(item => !item.sent && !item.submission)) session.queue = null;
+    // Direct reporting reuses immutable payloads from both legacy and newer
+    // queues. Never replace IDs or resend acknowledged items on an upgrade.
     if (!session.queue) {
       message('מכין את דיווחי התיקונים…'); await new Promise(resolve => setTimeout(resolve, 0));
       const reported = new Set(diffBook(session.book.originalText, session.reportedText ?? session.book.originalText).map(change => JSON.stringify(change)));
@@ -882,10 +895,12 @@ el('editor').addEventListener('submit', async event => {
       if (item.sent) continue; if (pause) break;
       message(`שולח דיווח ${sent + 1} מתוך ${session.queue.length}…`);
       try {
-        item.correctionSupported = await deliverReport(call, item);
+        item.correctionSupported = await deliverReport(host, item);
       } catch (error) {
         if (error.status === 409) {
-          item.payload.report_id = newId(); item.submission.reportId = item.payload.report_id; await persist();
+          item.payload.report_id = newId();
+          if (item.submission) item.submission.reportId = item.payload.report_id;
+          await persist();
         }
         throw error;
       }
@@ -918,7 +933,12 @@ async function initialize(boot) {
   }
   applyTheme(boot?.theme);
   const results = await Promise.allSettled([call('app.getTheme'), draftStorage.read(),
-    call('settings.get', { key: 'key-library-view-mode' })]);
+    call('settings.get', { key: 'key-library-view-mode' }), call('app.getInfo')]);
+  const versionParts = results[3].status === 'fulfilled' ? /^([0-9]+)\.([0-9]+)\.([0-9]+)(?:\+.*)?$/.exec(results[3].value?.version ?? '') : null;
+  // The released 0.9.98+801 has no plugin reader API. A newer app version or
+  // an explicit embedded boot supplied by a patched host proves support.
+  textReaderAvailable = !!embeddedReader || !!versionParts &&
+    (Number(versionParts[1]) > 0 || Number(versionParts[2]) > 9 || Number(versionParts[2]) === 9 && Number(versionParts[3]) >= 99);
   if (results[0].status === 'fulfilled') applyTheme(results[0].value);
   if (results[1].status === 'rejected') throw new Error('לא ניתן לקרוא את טיוטת הספר. בדקו את הרשאות האחסון.');
   if (results[2].status === 'fulfilled') libraryMode = results[2].value === 'list' ? 'tree' : 'grid';
@@ -940,22 +960,30 @@ async function initialize(boot) {
     message();
     return;
   }
-  for (const item of sessions) if (!item.book.toc?.length) item.book.toc = await call('library.getBookToc', item.book.identity).catch(() => []);
-  for (const item of sessions) await updateNikudDisplay(item);
   render(); restoreView();
-  for (const item of sessions) sourceGuard.restore(item.book);
+  // Core restoration must finish before optional library/metadata work. A
+  // queued reader click needs only its source book, not the entire catalogue
+  // or display maps for unrelated drafts. Submit still verifies every source.
+  const restoredSession = session;
+  if (restoredSession) setTimeout(() => {
+    if (session === restoredSession && !loading && !pendingBookRequests) refreshActiveDisplay().catch(error => message(error.message, true));
+  }, 0);
   if (!session) {
     message('טוען את הספרייה…');
-    libraryTree = sortLibraryTree(filterLibraryTree(await call('library.getTree', { includeBooks: true })));
-    if (chooserOpen) restoreView(); else renderLibrary();
     el('library-search').focus();
-  } else {
-    call('library.getTree', { includeBooks: true }).then(tree => { libraryTree = sortLibraryTree(filterLibraryTree(tree)); if (chooserOpen) restoreView(); else if (!session) renderLibrary(); }).catch(error => message(error.message, true));
   }
-  message(results[2].status === 'rejected' ? librarySettingsPermissionMessage : '', results[2].status === 'rejected');
+  call('library.getTree', { includeBooks: true }).then(tree => {
+    libraryTree = sortLibraryTree(filterLibraryTree(tree));
+    if (!loading && !pendingBookRequests && (chooserOpen || !session)) {
+      if (chooserOpen) restoreView(); else renderLibrary();
+    }
+    if (statusText === 'טוען את הספרייה…') message();
+  }).catch(error => { if (!loading && (chooserOpen || !session)) message(error.message, true); });
+  if (results[2].status === 'rejected') message(librarySettingsPermissionMessage, true);
+  else if (session) message();
 }
-async function updateNikudDisplay(item) {
-  const hidden = await readNikudDisplay(call, item.book).catch(() => item.hideNikud ?? false);
+async function updateNikudDisplay(item, request = call) {
+  const hidden = await readNikudDisplay(request, item.book).catch(() => item.hideNikud ?? false);
   if (hidden === !!item.hideNikud) return false;
   item.hideNikud = hidden;
   if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
@@ -966,16 +994,22 @@ async function refreshActiveDisplay() {
   if (!session || chooserOpen || loading || sending) return;
   const item = session;
   captureView();
-  if (await updateNikudDisplay(item) && item === session && !chooserOpen && !loading && !sending) {
+  const [toc, displayChanged] = await Promise.all([
+    !item.book.toc?.length ? call('library.getBookToc', item.book.identity).catch(() => []) : null,
+    updateNikudDisplay(item)
+  ]);
+  if (toc !== null) item.book.toc = toc;
+  if ((displayChanged || toc !== null) && item === session && !chooserOpen && !loading && !sending) {
     // Capture again after the RPC: editing may have continued while it ran.
     captureView();
-    if (item.view) { delete item.view.geometry; delete item.view.scrollTop; }
+    if (displayChanged && item.view) { delete item.view.geometry; delete item.view.scrollTop; }
     render(); restoreView(); scheduleSave();
   }
   initializeVisibleEditor();
 }
 if (host) {
   host.on('theme.changed', applyTheme); host.on('contextMenu.itemClicked', requestBook);
+  host.on('reader.toolbar_item_clicked', requestBook);
   host.on('settings.changed', event => { if (event.key === 'key-library-view-mode') applyLibraryMode(event.newValue); });
   host.on('plugin.permissions_changed', event => {
     if (event.permissions?.includes('settings.read')) initialized?.then(refreshLibraryMode).catch(error => message(error.message, true));

@@ -29,13 +29,13 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
       _booted: true,
       on(event, handler) { events.set(event, handler); },
       call(method, args = {}) {
-        if (method === 'feedback.submitBookCorrection') return (async () => {
+        if (method === 'network.fetchStream') return (async function* () {
           let release;
           const response = new Promise(resolve => { release = resolve; });
-          requests.push({ args: structuredClone(args), release });
+          requests.push({ args: JSON.parse(args.body), release });
           const status = await response;
-          if (status === 200) return { success: true, data: { status: 'sent', correctionSupported: false } };
-          return { success: false, error: status === 409 ? { code: 'error.report_id_conflict', message: 'מזהה הדיווח כבר שייך לתוכן אחר.' } : { message: 'השליחה לא הושלמה.' } };
+          yield { type: 'response', status };
+          yield { type: 'data', body: JSON.stringify({ success: status === 200, correction_supported: false }) };
         })();
         let data = null;
         if (method === 'storage.get') data = storage.get(args.key) ?? null;
@@ -89,14 +89,13 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     requests[0].release(200); await waitForRequests(2);
     assert.equal(savedSession().queue[0].sent, true);
     const firstPayload = requests[0].args, secondPayload = requests[1].args;
-    assert.equal(firstPayload.sectionIndex, 0);
-    assert.equal(secondPayload.sectionIndex, 1);
-    assert.equal(firstPayload.bookId, 'ספר');
-    assert.equal(firstPayload.original, 'ב');
-    assert.equal(firstPayload.forceFreeText, false);
-    assert.equal(firstPayload.allowQueue, false);
-    assert.deepEqual([firstPayload.sourceStart, firstPayload.sourceEnd], [1, 2]);
-    assert.equal(firstPayload.proposed, 'ם');
+    assert.equal(firstPayload.location.line_index, 0);
+    assert.equal(secondPayload.location.line_index, 1);
+    assert.equal(firstPayload.book_title, 'ספר');
+    assert.equal(firstPayload.correction.original_selection, 'ב');
+    assert.equal(firstPayload.report_kind, 'text_correction');
+    assert.deepEqual([firstPayload.correction.selection_offset.start, firstPayload.correction.selection_offset.end], [1, 2]);
+    assert.equal(firstPayload.correction.proposed_text, 'ם');
     requests[1].release(503); await submission;
     const partialWorkspace = storage.get('book-session'), partial = savedSession();
     assert.deepEqual(partial.queue.map(item => item.sent), [true, false]);
@@ -111,6 +110,9 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     assert.equal(el('proposed').value, 'אם\nגה');
     assert.equal(el('send').disabled, false);
     assert.deepEqual(storage.get('book-session'), partialWorkspace);
+    // A 0.1.1 queue has immutable payloads but no native submission metadata.
+    const legacyDraft = storage.get(partialWorkspace.sessions[0].draftKey);
+    for (const item of legacyDraft.queue) delete item.submission;
     savedEmail = 'updated@example.com';
     setup();
     await import('../plugin/app.js?fullbook-reload'); await settle();
@@ -126,7 +128,7 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     raw = 'אב\nגד';
     const retry = el('editor').fire('submit'); await waitForRequests(3);
     assert.deepEqual(requests[1].args, requests[2].args, 'retry keeps the complete submission');
-    assert.equal(requests[2].args.reportId, secondPayload.reportId);
+    assert.equal(requests[2].args.report_id, secondPayload.report_id);
     assert.equal(emailReads, 4, 'each submit reads current settings without adding an email dialog');
     await el('editor').fire('submit'); assert.equal(requests.length, 3);
     requests[2].release(200); await retry;
@@ -142,14 +144,14 @@ test('full book: partial delivery, persistent queue, reload retry, click guard a
     const additional = el('editor').fire('submit'); await waitForRequests(4);
     assert.equal(savedSession().queue.length, 1, 'previously reported corrections are excluded');
     const additionalPayload = requests[3].args;
-    assert.notEqual(additionalPayload.reportId, secondPayload.reportId);
+    assert.notEqual(additionalPayload.report_id, secondPayload.report_id);
     requests[3].release(409); await additional;
     await new Promise(resolve => setTimeout(resolve, 3100));
     assert.match(el('status').textContent, /מזהה הדיווח/, 'a newer error survives the previous success notice timer');
-    assert.notEqual(savedSession().queue[0].submission.reportId, additionalPayload.reportId);
+    assert.notEqual(savedSession().queue[0].submission.reportId, additionalPayload.report_id);
     const conflictRetry = el('editor').fire('submit'); await waitForRequests(5);
-    assert.notEqual(requests[4].args.reportId, additionalPayload.reportId);
-    assert.equal(requests[4].args.original, additionalPayload.original);
+    assert.notEqual(requests[4].args.report_id, additionalPayload.report_id);
+    assert.equal(requests[4].args.selected_text, additionalPayload.selected_text);
     requests[4].release(200); await conflictRetry;
     await new Promise(resolve => setTimeout(resolve, 3100));
     assert.equal(el('status').textContent, '', 'success notice disappears after three seconds');

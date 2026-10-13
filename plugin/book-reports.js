@@ -148,7 +148,8 @@ export async function prepareReports(session, changes, email, call, idFactory, o
           bookId: session.book.identity.bookId, sectionIndex: partFirst.index,
           currentRef: map.currentRef?.trim() || reportTocRef(session.book.toc, partFirst.index) }
       }, email);
-      // Otzaria fills the library build, heRef, DB book ID and full source path itself.
+      // Retain source snapshots and offsets for local history and source checks;
+      // the 0.9.98 compatibility sender transmits the immutable v2 payload.
       const partLast = sectionAt(session.book.sections, Math.max(partStart, partStart + original.length - 1));
       const localStart = partStart - partFirst.start;
       const submission = { reportId: payload.report_id, ...session.book.identity, sectionIndex: partFirst.index,

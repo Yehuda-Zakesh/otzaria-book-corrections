@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findInBook, createBookSearch, createAsyncBookSearch } from '../plugin/book-search.js';
+import { findInBook, createBookSearch, createAsyncBookSearch, matchesSearchText, createSearchTextMatcher } from '../plugin/book-search.js';
 import vm from 'node:vm';
 
 test('Hebrew nikud and cantillation are ignored while original ranges retain them', () => {
@@ -33,10 +33,24 @@ test('punctuation is literal and never a regular expression', () => {
 test('blank and mark-only queries have no matches', () => {
   for (const query of ['', ' ', '\n', '\u05b8\u0591']) assert.deepEqual(findInBook('אב', query), []);
 });
-test('spaces and newlines match exactly', () => {
-  assert.equal(findInBook('אב\nגד אב גד', 'אב גד')[0].offset, 6);
-  assert.equal(findInBook('אב\nגד אב גד', 'אב\nגד')[0].offset, 0);
-  assert.equal(findInBook('אב  גד', 'אב גד').length, 0);
+test('Hebrew phrases tolerate whitespace while preserving original ranges', () => {
+  assert.deepEqual(findInBook('אב\nגד אב גד', 'אב גד').map(hit => hit.offset), [0, 6]);
+  assert.equal(findInBook('אב  גד', 'אב גד')[0].end, 6);
+});
+
+test('abbreviations, plene spelling and typos find original Hebrew words', () => {
+  for (const [text, query] of [['רשב״א', 'רשבא'], ['רשבא', 'רשב"א'], ['חדושי', 'חידושי'], ['חידושי', 'חדושי'], ['אבולעפיה', 'אבועלפיה']]) {
+    const hits = findInBook('😀 ' + text + ' סוף', query);
+    assert.equal(hits.length, 1, `${query} in ${text}`);
+    assert.equal(hits[0].offset, 3);
+    assert.equal(hits[0].end, 3 + text.length);
+  }
+  assert.equal(findInBook('שבת', 'שבות').length, 0, 'short unrelated words are not fuzzy matches');
+});
+
+test('library lookup matches all terms across title and author in any order', () => {
+  assert.equal(matchesSearchText('חדושי הרשב״א רבי שלמה', 'שלמה חידושי רשבא'), true);
+  assert.equal(matchesSearchText('חדושי הרשב״א', 'חידושי רמבם'), false);
 });
 test('snippets cap Unicode context and preserve literal HTML as text', () => {
   const text = '😀'.repeat(100) + '<script>אב</script>' + '😃'.repeat(100);
@@ -128,4 +142,27 @@ test('worker errors suppress the browser error event and preserve a fallback res
   }; } });
   assert.deepEqual(await search('hello', 'hello'), findInBook('hello', 'hello'));
   assert.equal(prevented, true);
+});
+
+
+test('host normalization joins ASCII and Hebrew quotes but separates punctuation', () => {
+  const match = createSearchTextMatcher('ABC \u05e8\u05e9\u05d1\u05d0');
+  assert.equal(match('AbC-\u05e8\u05e9\u05d1"\u05d0'), true);
+  assert.equal(matchesSearchText('a\u2019b', 'ab'), false, 'curly quote is a separator in host normalization');
+  assert.equal(matchesSearchText('\u05d0\u05b8\u05d1\u05be\u05d2\u05d3', '\u05d0\u05d1 \u05d2\u05d3'), true);
+  assert.equal(createSearchTextMatcher('')(null), true, 'blank lookup does not tokenize titles');
+});
+
+test('host doubled consonantal vav and yod collapse without general short-word fuzziness', () => {
+  assert.equal(matchesSearchText('\u05d7\u05d5\u05d5\u05ea', '\u05d7\u05d5\u05ea'), true);
+  assert.equal(matchesSearchText('\u05e2\u05d9\u05d9\u05df', '\u05e2\u05d9\u05df'), true);
+  assert.equal(matchesSearchText('\u05e9\u05d1\u05ea', '\u05e9\u05d1\u05d5\u05ea'), false);
+});
+
+test('literal substring results exclude unmatched prefixes and suffixes and retain attached marks', () => {
+  const text = '\u05d5\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd\u05b8\u05db';
+  const [hit] = findInBook(text, '\u05e9\u05dc\u05d5\u05dd');
+  assert.equal(hit.offset, 1);
+  assert.equal(hit.end, text.length - 1);
+  assert.equal(text.slice(hit.offset, hit.end), text.slice(1, -1));
 });

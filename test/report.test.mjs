@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { buildReport, canonical, reportContentDigest, reportDeliveryMessage, deliverReport, validateSelection } from '../plugin/report.js';
+import { buildReport, canonical, reportContentDigest, reportDeliveryMessage, deliverReport, sendReport, ENDPOINT, validateSelection } from '../plugin/report.js';
 import { reportSha256 } from '../plugin/report-digest.js';
 
 const line = 'אָב 😀 אָב סוף';
@@ -80,19 +80,6 @@ test('rejects excessive text and missing locations', async () => {
   await assert.rejects(buildReport(value, 'me@example.com'));
 });
 
-test('delivery goes through Otzaria and reports whether the site accepted a structured correction', async () => {
-  const seen = [], payload = await buildReport(draft(), 'me@example.com'), item = { payload: { ...payload, report_kind: 'text_correction' }, submission: { reportId: 'a' } };
-  const call = (status, correctionSupported) => async (method, args) => { seen.push({ method, args }); return { status, correctionSupported }; };
-  assert.equal(await deliverReport(call('sent', true), item), true);
-  assert.equal(await deliverReport(call('sent', false), item), false);
-  assert.equal(seen[0].method, 'feedback.submitBookCorrection');
-  assert.equal(seen[0].args, item.submission);
-  await assert.rejects(deliverReport(call('queued', null), item), /לא אישרה/);
-});
-test('a report id conflict is surfaced as 409 so the id can be replaced', async () => {
-  const error = Object.assign(new Error('conflict'), { code: 'error.report_id_conflict' });
-  await assert.rejects(deliverReport(async () => { throw error; }, { payload: {}, submission: {} }), { status: 409 });
-});
 test('canonical validation rejects noninteger values and lone surrogates', () => {
   assert.equal(canonical({ z: 'א', a: 1 }), '{"a":1,"z":"א"}');
   assert.throws(() => canonical(1.5));
@@ -152,4 +139,59 @@ test('library path hints match the site resolver contract', async () => {
   const payload = await buildReport(draft(), 'a@b.co');
   assert.equal(payload.file_path, 'אוצריא/תנך/ספר לדוגמה.txt');
   assert.equal(payload.source_hint.library_relative_path, payload.file_path);
+});
+
+
+function streamHost(chunks, seen = []) {
+  return { call(method, args) {
+    seen.push({ method, args });
+    return (async function* () { for (const chunk of chunks) yield chunk; })();
+  } };
+}
+function responseHost(status, body, seen) {
+  return streamHost([{ type: 'response', status }, { type: 'data', body: typeof body === 'string' ? body : JSON.stringify(body) }], seen);
+}
+test('0.9.98 delivery streams the immutable report payload and verifies structured acceptance', async () => {
+  const payload = { ...(await buildReport(draft(), 'me@example.com')), report_kind: 'text_correction' };
+  const item = { payload }, seen = [];
+  assert.equal(await deliverReport(responseHost(200, { success: true, correction_supported: true }, seen), item), true);
+  assert.equal(seen[0].method, 'network.fetchStream');
+  assert.equal(seen[0].args.url, ENDPOINT);
+  assert.equal(seen[0].args.method, 'POST');
+  assert.equal(seen[0].args.timeoutMs, 30000);
+  assert.deepEqual(seen[0].args.headers, { 'Content-Type': 'application/json; charset=utf-8', Accept: 'application/json' });
+  assert.equal(seen[0].args.body, JSON.stringify(payload));
+  for (const correction_supported of [undefined, false, 'true']) {
+    assert.equal(await deliverReport(responseHost(200, { success: true, correction_supported }), item), false);
+  }
+  assert.equal(await deliverReport(responseHost(200, { success: true, correction_supported: true }), { payload: { report_kind: 'free_text' } }), false);
+});
+test('streaming response may split JSON across chunks', async () => {
+  const host = streamHost([{ type: 'response', status: 200 }, { type: 'data', body: '{"success":' }, { type: 'data', body: 'true,"duplicate":true}' }]);
+  assert.deepEqual(await sendReport(host, {}), { success: true, duplicate: true });
+});
+test('server acknowledgment requires HTTP 200 and an explicit JSON success boolean', async () => {
+  for (const body of ['', '<html>ok</html>', '{}', '{"success":false}', '{"success":"true"}', 'null']) {
+    await assert.rejects(sendReport(responseHost(200, body), {}));
+  }
+  for (const status of [0, 201, 204, 400, 413, 422, 500]) {
+    await assert.rejects(sendReport(responseHost(status, { success: true }), {}), { status });
+  }
+});
+test('conflicts and rate limits retain HTTP status for safe retry handling', async () => {
+  for (const status of [409, 429]) await assert.rejects(deliverReport(responseHost(status, {}), { payload: {} }), { status });
+});
+test('email notification failure retains the report except an acknowledged duplicate', async () => {
+  await assert.rejects(sendReport(responseHost(200, { success: true, email_sent: false }), {}));
+  assert.deepEqual(await sendReport(responseHost(200, { success: true, email_sent: false, duplicate: true }), {}), { success: true, email_sent: false, duplicate: true });
+});
+test('oversized server response is rejected before parsing', async () => {
+  await assert.rejects(sendReport(responseHost(200, ' '.repeat(65537)), {}));
+});
+test('network stream errors preserve failure and do not attempt another transport', async () => {
+  let calls = 0;
+  const error = new Error('offline');
+  const host = { call() { calls++; return (async function* () { yield { type: 'response', status: 200 }; throw error; })(); } };
+  await assert.rejects(deliverReport(host, { payload: {} }), error);
+  assert.equal(calls, 1);
 });

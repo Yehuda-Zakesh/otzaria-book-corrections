@@ -46,11 +46,11 @@ export function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = m
       }
     } finally { pumping = false; }
   }
-  return (method, args = {}) => {
+  return (method, args = {}, { priority: foreground = false } = {}) => {
     // Content chunks are explicitly exempt in the host; section maps and writes are not.
     if (method === 'library.getBookContent') return invoke(method, args, false);
     return new Promise((resolve, reject) => {
-      const priority = method.startsWith('storage.') || method === 'ui.setUnsavedChanges';
+      const priority = foreground || method.startsWith('storage.') || method === 'ui.setUnsavedChanges';
       (priority ? urgent : normal).push({ method, args, resolve, reject });
       pump();
     });

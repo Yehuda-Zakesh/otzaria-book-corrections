@@ -2,6 +2,93 @@ const hebrewMarks = /[\u0591-\u05BD\u05BF\u05C1\u05C2\u05C4\u05C5\u05C7]/g;
 const markCode = code => (code >= 0x0591 && code <= 0x05bd) || code === 0x05bf || code === 0x05c1 || code === 0x05c2 || code === 0x05c4 || code === 0x05c5 || code === 0x05c7;
 const normalize = text => text.normalize('NFD').toLowerCase().replace(hebrewMarks, '');
 
+// Port of Otzaria lib/data/repository/data_repository.dart normalization,
+// _wordPairMatches and _editDistanceAtMost (UTF-16, identical typo budgets).
+function searchWords(value) {
+  const words = []; let chunks = [], chunk = '', offset = -1, end = 0;
+  const flush = () => { if (offset >= 0) words.push({ word: chunks.join('') + chunk, offset, end }); chunks = []; chunk = ''; offset = -1; };
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
+    if (c >= 0x0591 && c <= 0x05c7) { if (c === 0x05be || c === 0x05c0) flush(); else if (offset >= 0) end = i + 1; continue; }
+    if (c === 0x22 || c === 0x27 || c === 0x05f3 || c === 0x05f4) { if (offset >= 0) end = i + 1; continue; }
+    if ((c >= 0x61 && c <= 0x7a) || (c >= 0x41 && c <= 0x5a) || (c >= 0x30 && c <= 0x39) || (c >= 0x0590 && c <= 0x05ff)) {
+      if (offset < 0) offset = i;
+      chunk += String.fromCharCode(c >= 0x41 && c <= 0x5a ? c + 0x20 : c);
+      if (chunk.length === 256) { chunks.push(chunk); chunk = ''; }
+      end = i + 1;
+    } else flush();
+  }
+  flush(); return words;
+}
+function searchWordMatches(query, word) {
+  if (word.includes(query)) return true;
+  if (query.length < 3) return false;
+  if (/(\u05d5\u05d5|\u05d9\u05d9)/.test(query + word) && word.replace(/\u05d5\u05d5/g, '\u05d5').replace(/\u05d9\u05d9/g, '\u05d9').includes(query.replace(/\u05d5\u05d5/g, '\u05d5').replace(/\u05d9\u05d9/g, '\u05d9'))) return true;
+  const length = Math.max(query.length, word.length);
+  const allowed = length <= 4 ? 0 : Math.min(4, Math.ceil(length / 4) - 1);
+  if (!allowed || Math.abs(query.length - word.length) > allowed) return false;
+  let previous2 = new Uint32Array(word.length + 1), previous = Uint32Array.from({ length: word.length + 1 }, (_, i) => i), row = new Uint32Array(word.length + 1), previousMin = 0;
+  for (let i = 1; i <= query.length; i++) {
+    row[0] = i; let rowMin = i;
+    for (let j = 1; j <= word.length; j++) {
+      const cost = query[i - 1] === word[j - 1] ? 0 : 1;
+      let best = Math.min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + cost);
+      if (i > 1 && j > 1 && query[i - 1] === word[j - 2] && query[i - 2] === word[j - 1]) best = Math.min(best, previous2[j - 2] + cost);
+      row[j] = best; rowMin = Math.min(rowMin, best);
+    }
+    if (rowMin > allowed && previousMin > allowed) return false;
+    const recycled = previous2; previous2 = previous; previous = row; row = recycled; previousMin = rowMin;
+  }
+  return previous[word.length] <= allowed;
+}
+export function createSearchTextMatcher(query) {
+  const terms = searchWords(query).map(item => item.word);
+  if (!terms.length) return () => true;
+  const matches = new Map();
+  return text => {
+    const words = searchWords(text);
+    return terms.every(term => words.some(({ word }) => {
+      const key = term + '\0' + word;
+      if (!matches.has(key)) matches.set(key, searchWordMatches(term, word));
+      return matches.get(key);
+    }));
+  };
+}
+export function matchesSearchText(text, query) { return createSearchTextMatcher(query)(text); }
+function tolerantQuery(query) { return /[א-ת]/.test(query) && /^[\u0591-\u05c7א-ת"'׳״‘’“”\s־-]+$/.test(query); }
+function findHebrewWords(text, query, limit, words) {
+  const terms = searchWords(query);
+  if (!terms.length) return [];
+  const results = [], matches = new Map();
+  const accepts = (term, word) => {
+    const key = term + '\0' + word;
+    if (!matches.has(key)) matches.set(key, searchWordMatches(term, word));
+    return matches.get(key);
+  };
+  for (let i = 0; i <= words.length - terms.length && results.length < limit; i++) {
+    if (!terms.every((term, j) => accepts(term.word, words[i + j].word))) continue;
+    // Exact containment highlights only the matching letters. Fuzzy spelling
+    // matches retain the complete original word (including nikud/quotes).
+    const boundary = (item, term, last) => {
+      const at = item.word.indexOf(term);
+      if (at < 0) return last ? item.end : item.offset;
+      const target = last ? at + term.length : at;
+      let normalizedOffset = 0;
+      for (let position = item.offset; position < item.end; position++) {
+        const c = text.charCodeAt(position);
+        if ((c >= 0x0591 && c <= 0x05c7) || c === 0x22 || c === 0x27 || c === 0x05f3 || c === 0x05f4) continue;
+        if (normalizedOffset === target) return position;
+        normalizedOffset++;
+      }
+      return item.end;
+    };
+    const offset = boundary(words[i], terms[0].word, false), end = boundary(words[i + terms.length - 1], terms.at(-1).word, true);
+    results.push({ offset, end, snippet: snippetFor(text, offset, end) });
+    i += terms.length - 1;
+  }
+  return results;
+}
+
 function snippetFor(text, start, end) {
   let leftStart = Math.max(0, start - 120), rightEnd = Math.min(text.length, end + 120);
   if (leftStart > 0 && /[\uDC00-\uDFFF]/.test(text[leftStart])) leftStart--;
@@ -13,16 +100,18 @@ function snippetFor(text, start, end) {
   return (start > left.length ? '…' : '') + left + middleDisplay + right + (end + right.length < text.length ? '…' : '');
 }
 
-/** Literal search in edited text; public offsets refer to the original UTF-16
- * string passed here. Nikud/cantillation are ignored, whitespace stays exact. */
+/** Search edited text using host word normalization and typo matching for Hebrew
+ * queries; other queries remain literal. Results refer to original UTF-16 ranges. */
 export function createBookSearch() {
-  let cachedText, normalizedText;
+  let cachedText, normalizedText, words;
   const search = (text, query, options = {}) => {
     if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
-    if (text !== cachedText) { cachedText = text; normalizedText = normalize(text); }
-    return findInBook(text, query, { ...options, normalizedText });
+    if (text !== cachedText) { cachedText = text; normalizedText = undefined; words = undefined; }
+    if (tolerantQuery(query)) words ??= searchWords(text);
+    else normalizedText ??= normalize(text);
+    return findInBook(text, query, { ...options, normalizedText, words });
   };
-  search.clear = () => { cachedText = undefined; normalizedText = undefined; };
+  search.clear = () => { cachedText = undefined; normalizedText = undefined; words = undefined; };
   return search;
 }
 
@@ -42,6 +131,7 @@ export function createAsyncBookSearch({ threshold = 250000, workerFactory } = {}
   }
   function makeWorker() {
     const source = `const hebrewMarks = ${hebrewMarks}; const markCode = ${markCode}; const normalize = ${normalize};
+      ${searchWords} ${searchWordMatches} ${tolerantQuery} ${findHebrewWords}
       ${snippetFor} ${findInBook} ${createBookSearch}
       const search = createBookSearch(); let text;
       self.onmessage = ({data}) => {
@@ -86,9 +176,10 @@ export function createAsyncBookSearch({ threshold = 250000, workerFactory } = {}
   return search;
 }
 
-export function findInBook(text, query, { limit = 200, normalizedText } = {}) {
+export function findInBook(text, query, { limit = 200, normalizedText, words } = {}) {
   if (typeof text !== 'string' || typeof query !== 'string') throw new TypeError('Search text and query must be strings');
   if (!Number.isFinite(limit) || limit <= 0 || !query.trim()) return [];
+  if (tolerantQuery(query)) return findHebrewWords(text, query, Math.floor(limit), words ?? searchWords(text));
   const needle = normalize(query);
   if (!needle.trim()) return [];
   const haystack = normalizedText ?? normalize(text), matches = [];

@@ -2,7 +2,7 @@
 
 ## APIs used by this plugin
 
-The embedded reader uses existing host methods, not the rejected editing/panel proposal. The local Otzaria implementation and its generated SDK reference were inspected on 11 October 2026. Version availability below is the host's declared minimum; it does not establish that every installed build contains a method.
+The embedded reader uses host methods, not the rejected editing/panel proposal. On 13 October 2026 the exact released tag `0.9.98+801` (`35c39819140625857d4bb7f0e4b02d264dcebcab`) was also inspected: it contains none of the four embedded-reader methods below and no `feedback.submitBookCorrection`. The earlier availability entries below refer to the local development host's declared minimum, not the released 0.9.98 API. Version 0.2.1 sends reports with the released `network.fetchStream` API and hides reader selection in 0.9.98. Embedded boot from a patched host, or a newer host version, enables reader functionality.
 
 | RPC | Required permission | Availability and host restrictions |
 | --- | --- | --- |
@@ -13,7 +13,7 @@ The embedded reader uses existing host methods, not the rejected editing/panel p
 | `reader.openBook({id?, bookId?, bookUid?, index?, reader:'native', navigateToPositionIfReused:true})` | `reader.open` | `openBook` itself exists since `0.9.89`; the embedded-reader/native override belongs to the `0.9.98` reader integration. Use the book's stable identity. `reader:'native'` forces the matching text-book tab to the native reader without disabling the global plugin preference. |
 | `feedback.submitBookCorrection({...})` | `feedback.send_email` | Since `0.9.99`. This is independent of the embedded reader APIs. Host validates an unambiguous official library text book and report snapshots; a reader-only `0.9.98` build is insufficient for this submission route. |
 
-The current [manifest](../plugin/manifest.json) declares `minAppVersion: 0.9.99`, `reader.open`, both library read permissions and `feedback.send_email`. Permission declarations do not replace the host's runtime granted-permission checks. Unsupported methods and denied permissions must surface an actionable error; they must not silently claim successful activation or submission. Call `setDefaultTextReader` directly from the user's explicit enable/disable action, rather than during boot or a background task.
+The current [manifest](../plugin/manifest.json) declares `minAppVersion: 0.9.98`, `reader.open`, both library read permissions, `reader.toolbar` and `network.access`. Reports use only the allowlisted reporting endpoint; no call to `feedback.submitBookCorrection` is bundled. Permission declarations do not replace runtime grants. `setDefaultTextReader` runs only from an explicit user action when reader support is available; initialization never invokes it.
 
 Source evidence in the local Otzaria checkout (`C:/Users/Zeev Levental/Documents/otzaria`):
 

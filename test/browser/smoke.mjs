@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { writeFile } from 'node:fs/promises';
+import { writeFile, readFile } from 'node:fs/promises';
 const pages = await (await fetch(`http://127.0.0.1:${process.env.CDP_PORT ?? 9227}/json`)).json();
 const ws = new WebSocket(pages.find(page => page.type === 'page').webSocketDebuggerUrl);
 await new Promise(resolve => ws.addEventListener('open', resolve, { once: true }));
@@ -38,11 +38,12 @@ const restore=p=>{if(!Array.isArray(p))return book.originalText.slice(0,p.start)
 return {...state,book:{...book,sections:book.sections.map(s=>({...s,text:book.originalText.slice(s.start,s.end)}))},editedText:restore(editedPatch),...(reportedPatch?{reportedText:restore(reportedPatch)}:{})};
 })});
 window.Otzaria = { _booted:true, on(name, fn) { window.mockHandlers[name] = fn; }, call(method,args) {
-if(method==='feedback.submitBookCorrection') return (async()=>{
+if(method==='network.fetchStream') return (async function* (){
 if(window.mockNetworkFails) throw new Error('Network unavailable');
-if(window.mockEmailFails) throw new Error('הדיווח נקלט באתר, אך האתר לא הצליח לשלוח את המייל לנמען.');
-window.mockReports.push({report_id:args.reportId,line_number:args.sectionIndex+1,error_details:args.details+' מוצע: '+args.proposed,schema_version:2,report_kind:args.forceFreeText?'free_text':'text_correction',correction:!args.forceFreeText});
-return {success:true,data:{status:'sent',correctionSupported:window.mockCorrectionSupported!==false}};})();
+if(args.url!=='https://otzaria.org/api/reportingerrors') throw new Error('Real reports forbidden in browser smoke');
+window.mockReports.push(JSON.parse(args.body));
+yield {type:'response',status:200};
+yield {type:'data',body:JSON.stringify({success:true,email_sent:!window.mockEmailFails,correction_supported:window.mockCorrectionSupported!==false})};})();
 return (async()=>{ let data = null;
 if(method==='app.getTheme') data=mockTheme;
 else if(method==='settings.get') data=window.mockLibraryMode;
@@ -68,8 +69,8 @@ const tokens=[...new Intl.Segmenter('he',{granularity:'grapheme'}).segment(sourc
 const start=Number(args.cursor??0);data.chars=tokens.slice(start,start+args.limit);data.hasMore=start+args.limit<tokens.length;data.nextCursor=data.hasMore?String(start+args.limit):null;
 }
 }
-else if(method==='library.getBookContent') data=(args.bookId==='second-book'?window.secondLines:mockLines).join(String.fromCharCode(10)).slice(args.offset,args.offset+args.limit);
-else if(method==='library.getBookDetails') data={id:args.bookId==='second-book'?2:99,bookUid:args.bookId==='second-book'?'id:2':'id:99',source:'library',type:'text',lineCount:args.bookId==='second-book'?window.secondLines.length:mockLines.length,title:args.bookId==='second-book'?'ספר שני':'ספר בדיקה',libraryPath:args.bookId==='second-book'?'second.txt':'mock.txt'};
+else if(method==='library.getBookContent') data=(args.bookId==='second-book'?window.secondLines.join(String.fromCharCode(10)):window.mockBookContent??mockLines.join(String.fromCharCode(10))).slice(args.offset,args.offset+args.limit);
+else if(method==='library.getBookDetails') data={id:args.bookId==='second-book'?2:99,bookUid:args.bookId==='second-book'?'id:2':'id:99',source:'library',type:'text',lineCount:args.bookId==='second-book'?window.secondLines.length:mockLines.length,title:args.bookId==='second-book'?'ספר שני':window.mockBookTitle??'ספר בדיקה',libraryPath:args.bookId==='second-book'?'second.txt':'mock.txt'};
 else if(method==='library.getBookToc') data=args.bookId==='pointed-book'?[{text:'התחלה',index:0,level:1},{text:'אמצע',index:300,level:1},{text:'סוף',index:599,level:1}]:args.bookId==='second-book'?[{text:'תחילת השני',index:0,level:1},{text:'אמצע השני',index:50,level:1}]:[{text:'ראשית',index:0,level:1},{text:'המשך',index:1,level:1}];
 else if(method.startsWith('network.')) throw new Error('Real reports forbidden in browser smoke');
 return {success:true,data}; })(); } };
@@ -495,8 +496,9 @@ assert.equal(await evaluate(`document.body.classList.contains('navigation-closed
 assert.ok(await evaluate(`document.getElementById('book-scroll').clientWidth`)>paneWidth, 'text expands when navigation closes');
 await evaluate(`document.getElementById('nav-toggle').click();document.getElementById('nav-pin').click();document.getElementById('book-scroll').dispatchEvent(new WheelEvent('wheel',{deltaY:100}))`);
 assert.equal(await evaluate(`document.body.classList.contains('navigation-closed')`), false, 'pinned navigation stays open');
+assert.equal(await evaluate(`document.getElementById('use-reader').hidden`),true,'released 0.9.98 hides the unsupported embedded reader action');
 await evaluate(`document.getElementById('use-reader').click()`);
-await waitFor(`window.mockReaderEnabled===true`, 'user selects the embedded reader');
+assert.equal(await evaluate(`window.mockReaderEnabled===undefined`),true,'even a programmatic click cannot invoke the missing 0.9.98 method');
 const embeddedBoot = await call('Page.addScriptToEvaluateOnNewDocument', {source:`
 window.mockLines=Array.from({length:600},(_,i)=>'פסקה '+i+' '+('טקסט לקריאה ועריכה ').repeat(10));
 window.Otzaria._booted=false;
@@ -559,6 +561,84 @@ await call('Input.insertText', {text:'מילה'});
 assert.equal(await evaluate(`document.getElementById('proposed').value`), 'טקסט מקורי\nפסקה שנייה מילה', 'typing a word after a space preserves separation');
 await waitFor(`window.mockStoredSession?.editedText.endsWith('מילה')`, 'whitespace edit saves');
 assert.equal(await evaluate(`window.mockStoredSession.editedText`), '   טקסט   מקורי  \n  פסקה   שנייה   מילה', 'original padding remains in source while new text is saved');
+// Regression: refining an overestimated segment must not leave the viewport
+// beyond the mounted text (the old absolute anchor creates blank pages).
+const editorModule = (await readFile('plugin/editor-window.js', 'utf8')).replace(/^export /gm, '');
+await evaluate(`(()=>{${editorModule}
+  const viewport=document.createElement('div'), canvas=document.createElement('div'), editor=document.createElement('textarea');
+  Object.assign(viewport.style,{position:'fixed',top:'0',left:'0',height:'300px',width:'500px',overflow:'auto',zIndex:'9999'});
+  Object.assign(canvas.style,{position:'relative'});
+  Object.assign(editor.style,{position:'absolute',width:'480px',font:'25px/38px Arial',whiteSpace:'pre-wrap',overflowWrap:'anywhere',padding:'0',border:'0',overflow:'hidden'});
+  canvas.append(editor);viewport.append(canvas);document.body.append(viewport);
+  const text=('פסקה לבדיקה '.repeat(1000)+'\\n').repeat(20);
+  const continuous=createContinuousEditor(viewport,canvas,editor,()=>{});
+  continuous.setText(text);
+  const geometry=continuous.geometry;geometry.heights.fill(100000);
+  continuous.setText(text,0,geometry);
+  viewport.scrollTop=geometry.heights.slice(0,8).reduce((sum,h,i)=>sum+(i<2?continuous.geometry.heights[i]:h),0)+90000;
+  window.blankRegression={viewport,canvas,editor,continuous,text};
+})()`);
+await new Promise(resolve=>setTimeout(resolve,150));
+const blankRegression = await evaluate(`(()=>{const {viewport,editor,continuous}=blankRegression;const v=viewport.getBoundingClientRect(),e=editor.getBoundingClientRect();return {covered:e.top<=v.top&&e.bottom>=v.bottom,top:viewport.scrollTop,range:continuous.range,editorTop:e.top,editorBottom:e.bottom};})()`);
+assert.equal(blankRegression.covered,true,JSON.stringify(blankRegression));
+await evaluate(`blankRegression.viewport.remove()`);
+await evaluate(`window.mockLines=['רשב״א חדושי אבולעפיה','סוף'];mockHandlers['reader.toolbar_item_clicked']({itemId:'correct-book',bookId:'tolerant-book',currentIndex:0});`);
+await waitFor(`window.mockStoredSession?.book.identity.bookId==='tolerant-book' && !document.getElementById('proposed').readOnly`, 'reader toolbar opens the source book');
+for (const [query, expected] of [['רשבא','רשב״א'],['חידושי','חדושי'],['אבועלפיה','אבולעפיה']]) {
+  await evaluate(`document.getElementById('book-search').value=${JSON.stringify(query)};document.getElementById('nav-search-tab').click();document.getElementById('book-search').dispatchEvent(new Event('input'));`);
+  await waitFor(`document.querySelectorAll('#book-search-results button').length===1`, 'tolerant browser search returns one result');
+  // Wait for the debounce for each query, including when the prior one had one result.
+  await new Promise(resolve=>setTimeout(resolve,200));
+  await evaluate(`document.querySelector('#book-search-results button').click()`);
+  assert.equal(await evaluate(`(()=>{const e=document.getElementById('proposed');return e.value.slice(e.selectionStart,e.selectionEnd);})()`),expected);
+}
+let actualBook = null;
+if (process.env.QA_BOOK_FIXTURE) {
+  const fixture = JSON.parse(await readFile(process.env.QA_BOOK_FIXTURE,'utf8'));
+  const bookModule = (await readFile('plugin/book.js','utf8')).replace(/^export /gm,'');
+  const started = performance.now();
+  await evaluate(`(()=>{${bookModule}
+    const rawLines=${JSON.stringify(fixture.lines)};
+    window.mockBookTitle=${JSON.stringify(fixture.book.title)};
+    window.mockBookContent=rawLines.join('\\n');window.mockLines=rawLines.map(sourceText);
+    mockHandlers['reader.toolbar_item_clicked']({itemId:'correct-book',bookId:'actual-chazon-ish',currentIndex:0});
+  })()`);
+  await waitFor(`window.mockStoredSession?.book.identity.bookId==='actual-chazon-ish' && !document.getElementById('proposed').readOnly`, 'actual local Chazon Ish source opens');
+  actualBook={title:fixture.book.title,sections:fixture.lines.length,rawCharacters:fixture.lines.join('\n').length,openMs:Math.round(performance.now()-started)};
+  assert.equal(await evaluate(`mockStoredSession.editedText===mockLines.join('\\n')`),true,'actual source is preserved exactly');
+  for (const mode of ['light','dark']) {
+    await evaluate(`mockHandlers['theme.changed']({...mockTheme,mode:${JSON.stringify(mode)},colorScheme:${mode === 'dark' ? "{...mockTheme.colorScheme,surface:'#141218',onSurface:'#e6e0e9',onSurfaceVariant:'#cac4d0',surfaceContainerHigh:'#2b2930',secondaryContainer:'#4a4458',onSecondaryContainer:'#e8def8'}" : 'mockTheme.colorScheme'}})`);
+    for (const distance of [0,900,1800,3600,7000]) {
+      await evaluate(`document.getElementById('book-scroll').scrollTop=${distance}`);
+      await new Promise(resolve=>setTimeout(resolve,80));
+      assert.equal(await evaluate(`(()=>{const v=document.getElementById('book-scroll').getBoundingClientRect(),e=document.getElementById('proposed').getBoundingClientRect();return e.top<=v.top+30&&e.bottom>=v.bottom-30;})()`),true,`actual book viewport covered at ${distance} in ${mode}`);
+    }
+    const screenshot=await call('Page.captureScreenshot',{format:'png'});
+    await writeFile(`test/browser/plugin-chazon-${mode}.png`,Buffer.from(screenshot.data,'base64'));
+  }
+}
+// Cold right-click before SDK boot must not wait for a full catalogue. Keep
+// the catalogue stalled until the source editor and exact caret are visible.
+await call('Page.addScriptToEvaluateOnNewDocument',{source:`
+window.mockLines=['פתיחה','מקום הקליק','סוף'];window.mockBookContent=undefined;
+window.mockStoredSession=null;window.mockIndex=null;window.mockWorkspace=null;window.mockStorage=new Map();
+window.Otzaria._booted=false;window.coldCalls=[];
+const coldOriginalCall=Otzaria.call.bind(Otzaria);
+Otzaria.call=function(method,args){coldCalls.push(method);if(method==='library.getTree')return new Promise(resolve=>{window.releaseColdTree=()=>resolve(coldOriginalCall(method,args));});return coldOriginalCall(method,args);};
+document.addEventListener('DOMContentLoaded',()=>{window.coldOpenStarted=performance.now();mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'cold-context-book',bookUid:'id:99',sections:[{sectionIndex:1,sourceRange:{start:{utf16:3}}}]}});mockHandlers['plugin.boot']({});});
+`});
+await call('Page.reload');
+await waitFor(`mockStoredSession?.book.identity.bookId==='cold-context-book' && !document.getElementById('proposed').readOnly && document.getElementById('section-number').value==='2'`, 'cold context opens while the catalogue is stalled');
+const coldContext = await evaluate(`({openMs:Math.round(performance.now()-coldOpenStarted),caret:document.getElementById('proposed').selectionStart,focus:document.activeElement.id,detailsReads:coldCalls.filter(m=>m==='library.getBookDetails').length})`);
+assert.equal(coldContext.caret,9);
+assert.equal(coldContext.focus,'proposed');
+assert.equal(coldContext.detailsReads,1);
+await evaluate(`mockHandlers['contextMenu.itemClicked']({itemId:'correct-book',selection:{bookId:'cold-context-book',bookUid:'id:99',currentIndex:0,sourceRange:{start:{utf16:2}}}})`);
+await waitFor(`document.getElementById('section-number').value==='1' && document.getElementById('proposed').selectionStart===2`, 'a second context click uses the new source position');
+assert.equal(await evaluate(`coldCalls.filter(m=>m==='library.getBookDetails').length`),1,'reopening the existing book does not reload its source');
+await evaluate(`releaseColdTree()`);
+await new Promise(resolve=>setTimeout(resolve,100));
+assert.equal(await evaluate(`document.activeElement.id`),'proposed','late catalogue completion cannot steal reader focus');
 assert.equal(errors.length, 0, JSON.stringify(errors));
-console.log(JSON.stringify({ protocol:'file:', boot, homeGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, tabs:{count:2,independentDrafts:true,scrollRestored:true,selectionRestored:true,keyboardFocus:true,reloadRestored:true,closeCancellation:true}, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, exceptions:errors.length }, null, 2));
+console.log(JSON.stringify({ protocol:'file:', boot, homeGeometry, editor, navigation, search, emptyEmailBlocked:true, submission, restored, tabs:{count:2,independentDrafts:true,scrollRestored:true,selectionRestored:true,keyboardFocus:true,reloadRestored:true,closeCancellation:true}, scrollNavigation, focusStyle, middleBefore, middleAfter, resizedWithoutTextLoss:true, endBefore, endAfter, layoutComparison, blankRegression, tolerantSearch:true, actualBook, coldContext, exceptions:errors.length }, null, 2));
 ws.close();
