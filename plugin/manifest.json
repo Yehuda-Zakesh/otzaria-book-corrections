@@ -2,31 +2,101 @@
   "schemaVersion": 1,
   "id": "org.otzaria.community.book-corrections",
   "name": "תיקוני ספרים",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "stability": "experimental",
-  "description": "עריכת עותק של ספר והפיכת השינויים לדיווחי שגיאות לאוצריא.",
+  "description": "תיקון נוסח הספר בקורא של אוצריא, שמירת התיקונים ושליחתם כדיווחי שגיאות.",
   "author": "Yehuda-Zakesh",
   "homepage": "https://github.com/Yehuda-Zakesh/otzaria-book-corrections",
   "entrypoint": "index.html",
-  "minAppVersion": "0.9.98",
+  "minAppVersion": "0.9.99",
   "sdkVersion": "1.x",
   "permissions": [
-    "app.user_email.read", "app.startup_contributions",
-    "reader.open", "reader.context_menu", "reader.toolbar", "library.books.read", "library.content.read",
-    "settings.read", "events.subscribe:settings.changed", "network.access"
+    "app.startup_contributions",
+    "app.run_on_startup",
+    "app.background_keep_alive",
+    "reader.open",
+    "reader.context_menu",
+    "reader.toolbar",
+    "reader.local_edit",
+    "reader.highlight",
+    "library.books.read",
+    "library.content.read",
+    "feedback.send_email",
+    "events.subscribe:reader.current_ref_changed"
   ],
-  "network": { "enabled": true, "allowlist": ["https://otzaria.org/api/reportingerrors"] },
   "contributes": {
-    "toolTab": { "title": "תיקוני ספרים", "iconName": "document_edit_24_regular", "defaultPinned": false },
+    "toolTab": {
+      "title": "תיקוני ספרים",
+      "iconName": "document_edit_24_regular",
+      "defaultPinned": false
+    },
     "startup": {
-      "toolbarItems": [{
-        "id": "correct-book", "title": "העבר את הספר לתיקון", "icon": "document_edit_24_regular",
-        "contexts": ["reader-text"], "openPlugin": true
-      }],
-      "contextMenuItems": [{
-        "id": "correct-book", "title": "העבר את הספר לתיקון", "icon": "document_edit_24_regular",
-        "contexts": ["reader-selection", "reader-page-shape-selection"], "openPlugin": true
-      }]
+      "toolbarItems": [
+        {
+          "id": "correct-book",
+          "title": "תיקון הספר בקורא",
+          "icon": "document_edit_24_regular",
+          "contexts": [
+            "reader-text"
+          ]
+        }
+      ],
+      "contextMenuItems": [
+        {
+          "id": "correct-book",
+          "title": "תיקון הספר בקורא",
+          "icon": "document_edit_24_regular",
+          "contexts": [
+            "reader-book",
+            "reader-selection"
+          ]
+        }
+      ],
+      "activationEvents": [
+        {
+          "topic": "app.startup",
+          "when": {
+            "all": [
+              {
+                "not": {
+                  "storage": {
+                    "key": "markPendingInReader",
+                    "equals": false
+                  }
+                }
+              },
+              {
+                "storage": {
+                  "key": "readerMarksPending",
+                  "equals": true
+                }
+              }
+            ]
+          }
+        },
+        {
+          "topic": "reader.current_ref_changed",
+          "when": {
+            "all": [
+              {
+                "not": {
+                  "storage": {
+                    "key": "markPendingInReader",
+                    "equals": false
+                  }
+                }
+              },
+              {
+                "storage": {
+                  "key": "readerMarksPending",
+                  "equals": true
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "keepAlive": true
     }
   }
 }

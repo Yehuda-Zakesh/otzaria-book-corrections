@@ -7,54 +7,46 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="tabbar-shell">
-    <strong id="screen-title" class="sr-only">תיקוני ספרים</strong>
-    <button id="nav-toggle" class="icon-button" type="button" aria-label="פתח או סגור ניווט" aria-expanded="true" title="ניווט"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg></button>
-    <nav id="book-tabs" role="tablist" aria-label="ספרים לתיקון" hidden></nav>
-    <div class="tabbar-tools">
-      <button id="change-book" type="button" class="icon-button" aria-label="פתח ספר נוסף" title="פתח ספר נוסף" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-      <button id="send" type="submit" form="editor">שלח דיווח</button>
-      <details id="reader-menu"><summary class="icon-button" aria-label="פעולות נוספות" title="פעולות נוספות"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></summary><div class="reader-menu-items">
-        <button id="nav-pin" class="ghost" type="button" aria-pressed="false">נעץ ניווט</button>
-        <button id="personal-open" class="ghost" type="button">האזור האישי</button>
-        <button id="use-reader" class="ghost" type="button">השתמש כקורא באוצריא</button>
-        <button id="native-reader" class="ghost" type="button" hidden>קורא רגיל</button>
-        <div id="reader-settings" hidden><button id="font-smaller" class="ghost" type="button" aria-label="הקטן אות">א−</button><button id="font-larger" class="ghost" type="button" aria-label="הגדל אות">א+</button></div>
-      </div></details>
-    </div>
-  </div>
-  <main>
+  <header class="panel-header">
+    <h1 id="screen-title">תיקוני ספרים</h1>
+    <button id="refresh" class="ghost" type="button">רענן</button>
+  </header>
+  <main id="panel">
     <p id="status" role="status" aria-live="polite">טוען…</p>
-    <section id="personal-area" hidden aria-labelledby="personal-title">
-      <div class="personal-toolbar"><h1 id="personal-title">התיקונים שלי</h1><button id="personal-scan" type="button">בדוק מול הספרייה</button><button id="personal-back" class="ghost" type="button">חזור לספר</button></div>
-      <p>הבדיקה משווה לספרייה המותקנת במחשב. התאמת נוסח אינה אישור שהדיווח התקבל על ידי צוות אוצריא. לאחר עדכון הספרייה אפשר לבדוק שוב.</p>
-      <div id="personal-list"></div>
+    <section id="embedded-notice" class="card notice" hidden aria-labelledby="embedded-title">
+      <h2 id="embedded-title">התוסף אינו קורא טקסט עוד</h2>
+      <p>העריכה מתבצעת עכשיו בקורא של אוצריא, עם סימון הפסקאות המתוקנות. הטיוטות הקודמות שמורות ומוצגות בדף התוסף.</p>
+      <button id="embedded-native" type="button">חזרה לקורא הרגיל</button>
     </section>
-    <section id="empty" hidden>
-      <div class="library-toolbar">
-        <label for="library-search" class="sr-only">איתור ספר או מחבר בספרייה</label>
-        <input id="library-search" type="search" placeholder="איתור ספר או מחבר בספרייה" autocomplete="off">
-        <button id="cancel-book-picker" type="button" class="ghost" hidden>חזור לספר</button>
-      </div>
-      <nav id="library-breadcrumbs" aria-label="מיקום בספרייה"></nav>
-      <nav id="library-list" aria-label="ספריית אוצריא"></nav>
+    <section aria-labelledby="live-title">
+      <h2 id="live-title">עריכה בקורא</h2>
+      <p class="hint">כדי לתקן ספר, לחצו לחיצה ימנית בתוך הספר ובחרו „תיקון הספר בקורא”, או בחרו לשונית כאן. הנוסח נערך בקורא של אוצריא; הספר עצמו אינו משתנה.</p>
+      <div id="live-list"></div>
+      <div id="tab-list"></div>
     </section>
-    <form id="editor" role="tabpanel" hidden>
-      <div class="editor-layout">
-        <aside class="book-navigation" aria-label="ניווט בספר">
-          <div class="nav-tabs" role="tablist" aria-label="ניווט בספר"><button id="nav-toc-tab" type="button" role="tab" aria-controls="toc-view" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h16"/></svg><span>ניווט</span></button><button id="nav-search-tab" type="button" role="tab" aria-controls="search-view" aria-selected="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span>חיפוש</span></button></div>
-          <div id="toc-view" class="nav-view" role="tabpanel" aria-labelledby="nav-toc-tab">
-          <div class="nav-header"><strong id="nav-title">תוכן הספר</strong><button id="toc-expand" class="icon-button" type="button" aria-label="הרחב או כווץ את תוכן העניינים" title="הרחב או כווץ הכל"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 9 5-5 5 5M7 15l5 5 5-5"/></svg></button><button id="toc-search-toggle" class="icon-button" type="button" aria-label="חיפוש בתוכן העניינים" title="חיפוש בתוכן העניינים"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg></button></div>
-          <div id="toc-search-wrap" hidden><label for="toc-search" class="sr-only">חיפוש בתוכן העניינים</label><input id="toc-search" type="search" placeholder="חיפוש בתוכן העניינים"></div>
-          <nav id="toc-list" aria-label="תוכן העניינים"></nav>
-          <div class="section-jump" hidden><label for="section-number">פסקה</label><input id="section-number" type="number" min="1"><button id="go-section" type="button" class="ghost">עבור</button></div>
-          </div>
-          <div id="search-view" class="nav-view" role="tabpanel" aria-labelledby="nav-search-tab" hidden><div class="book-search-field"><label for="book-search" class="sr-only">חיפוש בספר</label><input id="book-search" type="search" placeholder="חיפוש בספר" autocomplete="off"></div><nav id="book-search-results" aria-label="תוצאות חיפוש בספר"></nav></div>
-        </aside>
-        <div class="book-editor"><label for="proposed" class="sr-only">הספר לתיקון</label><div id="book-scroll"><div id="editor-canvas"><textarea id="proposed" dir="rtl" spellcheck="false"></textarea></div></div></div>
+    <section aria-labelledby="books-title">
+      <h2 id="books-title">תיקונים לשליחה</h2>
+      <div id="book-list"></div>
+    </section>
+    <section id="legacy-area" aria-labelledby="legacy-title" hidden>
+      <h2 id="legacy-title">טיוטות מגרסה קודמת (0.2.2)</h2>
+      <p class="hint">הטיוטות הקודמות נשמרות כפי שהן ואינן נמחקות. אפשר להעביר תיקון לקורא כשהמקור לא השתנה, או לסמן אותו כטופל.</p>
+      <div id="legacy-list"></div>
+    </section>
+    <section aria-labelledby="settings-title">
+      <h2 id="settings-title">הגדרות</h2>
+      <div class="card">
+        <label class="row setting" for="marks-toggle">
+          <span class="grow">סימון תיקונים ממתינים בספר<span class="hint block">המילים שהצעתם לתקן ועוד לא נשלחו מסומנות בירוק בקורא. בזמן העריכה עצמה אוצריא אינה מציגה סימונים.</span></span>
+          <input id="marks-toggle" type="checkbox" role="switch" checked>
+        </label>
+        <p id="marks-permission" class="hint" hidden>כדי לסמן בספר יש לאשר לתוסף את ההרשאה „הדגשות בטקסט” בניהול התוספים.</p>
       </div>
-      <footer hidden><button id="pause" type="button" class="ghost" hidden>עצור שליחה</button><button id="discard" type="button" class="ghost">ביטול התיקונים</button><span id="draft-status"></span></footer>
-    </form>
+    </section>
+    <section aria-labelledby="history-title">
+      <h2 id="history-title">היסטוריית שליחה</h2>
+      <div id="history-list"></div>
+    </section>
   </main>
   <script src="app.bundle.js"></script>
 </body>

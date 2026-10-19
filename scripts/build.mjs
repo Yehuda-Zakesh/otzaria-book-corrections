@@ -3,18 +3,31 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { Script } from 'node:vm';
 
+// Bundle order; app.js is the entry. watch.mjs uses the same list.
+export const MODULES = ['report-digest.js', 'changes.js', 'book.js', 'draft-storage.js', 'rpc.js',
+  'correction-store.js', 'correction-sessions.js', 'correction-submit.js', 'legacy-drafts.js', 'text-diff.js', 'reader-marks.js', 'app.js'];
+const local = MODULES.map(name => name.replace(/\.js$/, '').replace(/[-.]/g, '\$&')).join('|');
+
 // This deliberately supports only this project's local modules. Unexpected module
 // syntax fails the build instead of silently producing a broken installed plugin.
 export async function build() {
   const root = new URL('../plugin/', import.meta.url);
-  const sources = [];
-  for (const name of ['report-digest.js', 'report.js', 'book.js', 'correction-source.js', 'changes.js', 'text-display.js', 'book-reports.js', 'rpc.js', 'navigation.js', 'toc-tree.js', 'book-search.js', 'editor-window.js', 'library-order.js', 'draft-storage.js', 'source-guard.js', 'personal-history.js', 'app.js']) {
+  const sources = [], names = new Map();
+  for (const name of MODULES) {
     const source = (await readFile(new URL(name, root), 'utf8'))
+      .replace(/^\uFEFF/, '')
       .replace(/\r\n/g, '\n')
       .replace(/^export (?=(?:async )?function\s|const\s)/gm, '')
-      .replace(/^import \{[^\n]+\} from '\.\/(?:report-digest|report|book|correction-source|changes|text-display|book-reports|rpc|navigation|toc-tree|book-search|editor-window|library-order|draft-storage|source-guard|personal-history)\.js';\r?\n/gm, '');
+      .replace(new RegExp(`^import \{[^\n]+\} from '\./(?:${local})\.js';\n`, 'gm'), '');
     if (/^\s*(?:import|export)\b/m.test(source) || /\bimport\s*\(/.test(source)) {
       throw new Error(`Unsupported module syntax in ${name}`);
+    }
+    // All modules share one scope: a repeated top-level name would silently
+    // replace another module's function.
+    for (const [, first, second] of source.matchAll(/^(?:async )?function\s+([\w$]+)|^(?:const|let|var)\s+([\w$]+)/gm)) {
+      const declared = first ?? second;
+      if (names.has(declared) && names.get(declared) !== name) throw new Error(`Top-level name ${declared} in ${name} repeats ${names.get(declared)}`);
+      names.set(declared, name);
     }
     sources.push(source);
   }
