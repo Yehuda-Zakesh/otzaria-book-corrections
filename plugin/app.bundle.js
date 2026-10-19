@@ -998,14 +998,21 @@ function submissionParams(book, item, reportId, { freeText = false } = {}) {
     ...(freeText ? {} : { requireTextCorrection: true }) };
 }
 
+// correctionSupported only says the site did not reject a text_correction; the
+// site also answers true for reports it routes to email only. Nothing in the
+// result tells whether a report entered the site's correction queue, was
+// approved or was published, so no label claims any of that. Labels are
+// derived on display, so stored history records are never rewritten.
 function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
   if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי — מגיע לדוא״ל בלבד ואינו בתור התיקונים באתר';
-  if (result.correctionSupported === true) return 'התקבל באתר כתיקון מובנה';
+  if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';
 }
+// 0.2.2 stored correctionSupported from the same site answer.
+const legacyDeliveryLabel = () => 'נשלח בגרסה הקודמת — סטטוס הטיפול באתר אינו ידוע';
 
 /** Sends one stored proposal. An attempt record is written first, so after a
  * timeout or restart the same report ID is reused and Otzaria deduplicates. */
@@ -1555,7 +1562,7 @@ async function sendItems(bookUid, keys) {
     if (!['sent', 'queued'].includes(result.status)) keys = keys.filter(index => index !== item.sectionIndex);
   }
   const parts = [];
-  if (sent) parts.push(`${sent} נשלחו`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
+  if (sent) parts.push(`${sent} נשלחו דרך אוצריא`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
   if (kept) parts.push(`${kept} נשארו לטיפול`);
   if (parts.length) message(parts.join('; ') + '.', kept > 0 && !sent && !queued, 8000);
   // Remove fully handled versions only when no live session can still add to them.
@@ -1775,7 +1782,7 @@ function renderLegacy() {
       const view = node('div', 'change');
       view.append(node('strong', '', `דיווח ${report.reportId ?? ''}${report.sectionIndex != null ? ` · פסקה ${report.sectionIndex + 1}` : ''}`),
         diffView(report.original, report.proposed));
-      if (report.sent) view.append(node('p', 'hint', report.correctionSupported ? 'נשלח בגרסה הקודמת ואושר באתר כתיקון מובנה' : 'נשלח בגרסה הקודמת'));
+      if (report.sent) view.append(node('p', 'hint', legacyDeliveryLabel(report)));
       else if (record) view.append(node('p', 'hint', record.status === 'dismissed' ? 'סומן כטופל' : deliveryLabel(record.result) ?? record.status));
       else {
         const actions = node('div', 'actions');

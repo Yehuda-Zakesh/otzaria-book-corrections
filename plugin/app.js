@@ -1,7 +1,7 @@
 import { createRpcCall } from './rpc.js';
 import { createCorrectionStore } from './correction-store.js';
 import { createSessionController, codeOf } from './correction-sessions.js';
-import { submitItem, deliveryLabel } from './correction-submit.js';
+import { submitItem, deliveryLabel, legacyDeliveryLabel } from './correction-submit.js';
 import { readLegacyDrafts, readLegacyHistory } from './legacy-drafts.js';
 import { loadBook, sourceText } from './book.js';
 import { computeTextDiff, mergeProposals } from './text-diff.js';
@@ -240,7 +240,7 @@ async function sendItems(bookUid, keys) {
     if (!['sent', 'queued'].includes(result.status)) keys = keys.filter(index => index !== item.sectionIndex);
   }
   const parts = [];
-  if (sent) parts.push(`${sent} נשלחו`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
+  if (sent) parts.push(`${sent} נשלחו דרך אוצריא`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
   if (kept) parts.push(`${kept} נשארו לטיפול`);
   if (parts.length) message(parts.join('; ') + '.', kept > 0 && !sent && !queued, 8000);
   // Remove fully handled versions only when no live session can still add to them.
@@ -460,7 +460,7 @@ function renderLegacy() {
       const view = node('div', 'change');
       view.append(node('strong', '', `דיווח ${report.reportId ?? ''}${report.sectionIndex != null ? ` · פסקה ${report.sectionIndex + 1}` : ''}`),
         diffView(report.original, report.proposed));
-      if (report.sent) view.append(node('p', 'hint', report.correctionSupported ? 'נשלח בגרסה הקודמת ואושר באתר כתיקון מובנה' : 'נשלח בגרסה הקודמת'));
+      if (report.sent) view.append(node('p', 'hint', legacyDeliveryLabel(report)));
       else if (record) view.append(node('p', 'hint', record.status === 'dismissed' ? 'סומן כטופל' : deliveryLabel(record.result) ?? record.status));
       else {
         const actions = node('div', 'actions');

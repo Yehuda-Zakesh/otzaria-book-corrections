@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorrectionStore } from '../plugin/correction-store.js';
 import { createSessionController } from '../plugin/correction-sessions.js';
-import { correctionRange, submissionParams, submitItem, deliveryLabel } from '../plugin/correction-submit.js';
+import { correctionRange, submissionParams, submitItem, deliveryLabel, legacyDeliveryLabel } from '../plugin/correction-submit.js';
 import { createFakeOtzaria, createStorage } from './fake-otzaria.mjs';
 
 async function stored(host, storage = createStorage(), edits = [[0, 'אלף מתוקן']]) {
@@ -38,7 +38,7 @@ test('structured submission requires text_correction and records sent status', a
   assert.deepEqual(params.snapshots, [{ index: 0, text: 'אלף' }]);
   const result = await submitItem({ call, store, book, item });
   assert.equal(result.status, 'sent');
-  assert.equal(deliveryLabel(result.record), 'התקבל באתר כתיקון מובנה');
+  assert.equal(deliveryLabel(result.record), 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע');
   assert.deepEqual((await reload(store)).pending, []);
   // Never resent once confirmed.
   const again = await submitItem({ call, store, book, item: (await reload(store)).handled[0] });
@@ -56,6 +56,21 @@ test('text_correction_unavailable needs an explicit decision; nothing is sent or
   const free = await submitItem({ call, store, book, item: (await reload(store)).pending[0], freeText: true });
   assert.equal(free.status, 'sent');
   assert.equal(host.submissions.get(free.record.reportId).params.requireTextCorrection, undefined);
+});
+
+// The site answers correction_supported: true for email_only routing too, so
+// the flag proves neither entry into the site's correction queue nor approval.
+test('sent with correctionSupported: true is not presented as entering the site queue', () => {
+  const claims = /התקבל באתר|אושר|בתור התיקונים|פורסם/;
+  const result = { status: 'sent', correctionSupported: true, reportKind: 'text_correction' };
+  for (const record of [result, { result }, { status: 'sent', correctionSupported: true }]) {
+    assert.equal(deliveryLabel(record), 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע');
+    assert.doesNotMatch(deliveryLabel(record), claims);
+  }
+  // 0.2.2 reports stored this flag from the same site answer.
+  for (const correctionSupported of [true, false, null]) {
+    assert.equal(legacyDeliveryLabel({ sent: true, correctionSupported }), 'נשלח בגרסה הקודמת — סטטוס הטיפול באתר אינו ידוע');
+  }
 });
 
 test('queued is not presented as received by the site', async () => {

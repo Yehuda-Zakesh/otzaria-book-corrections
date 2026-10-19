@@ -53,14 +53,21 @@ export function submissionParams(book, item, reportId, { freeText = false } = {}
     ...(freeText ? {} : { requireTextCorrection: true }) };
 }
 
+// correctionSupported only says the site did not reject a text_correction; the
+// site also answers true for reports it routes to email only. Nothing in the
+// result tells whether a report entered the site's correction queue, was
+// approved or was published, so no label claims any of that. Labels are
+// derived on display, so stored history records are never rewritten.
 export function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
   if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי — מגיע לדוא״ל בלבד ואינו בתור התיקונים באתר';
-  if (result.correctionSupported === true) return 'התקבל באתר כתיקון מובנה';
+  if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';
 }
+// 0.2.2 stored correctionSupported from the same site answer.
+export const legacyDeliveryLabel = () => 'נשלח בגרסה הקודמת — סטטוס הטיפול באתר אינו ידוע';
 
 /** Sends one stored proposal. An attempt record is written first, so after a
  * timeout or restart the same report ID is reused and Otzaria deduplicates. */
