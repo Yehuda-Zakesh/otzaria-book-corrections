@@ -7,8 +7,14 @@ import { loadBook, sourceText } from './book.js';
 import { mergeProposals } from './text-diff.js';
 import { createReaderMarks, marksEnabled, MARK_SETTING_KEY } from './reader-marks.js';
 import { appendFormattedDiff } from './book-format.js';
+import { planReplacements } from './find-replace.js';
+import { createSendVisibility } from './send-visibility.js';
+import { createDiagnostics } from './diagnostics.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
-const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
+let diagnostics;
+const rawCall = host ? createRpcCall(host, { onRetry: data => diagnostics?.record('rpc.retry', data) }) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
+diagnostics = createDiagnostics(rawCall);
+const call = diagnostics.wrap(rawCall);
 const store = createCorrectionStore(call);
 let state = { books: new Map() }, legacy = { drafts: [], failures: [] }, legacyHistory = [], openTabs = [];
 let busy = false, renderQueued = false, statusTimer, startInitialization, initialized, embedded = null;
@@ -20,6 +26,8 @@ let currentScreen = 'work', lastMainScreen = 'work', reporterHasEmail = null;
 const screenScroll = new Map();
 // Pending proposals are marked green in the reader (a setting, on by default).
 const marks = createReaderMarks(call);
+const sendVisibility = createSendVisibility(call);
+let replacePlan = null, replaceNotice = '';
 let marksOn = true, highlightGranted = true, refCheck = 0;
 const reasons = {
   source_changed: 'המקור השתנה מאז התיקון', not_found: 'הפסקה אינה קיימת עוד בספר',
@@ -30,7 +38,7 @@ const reasons = {
 const endReasons = { user: 'העריכה הסתיימה בקורא', explicit: 'העריכה הסתיימה מהתוסף', tab_closed: 'הלשונית נסגרה',
   plugin_unavailable: 'התוסף הושבת או שהרשאת העריכה בוטלה', window_closed: 'החלון נסגר', app_exit: 'אוצריא נסגרה',
   ownership_lost: 'הספר נפתח לעריכה בחלון אחר; השינויים שלא נשמרו נשמרו כהתנגשויות' };
-const errorText = error => ({
+const errorText = error => error.userMessage ?? ({
   correction_busy: 'הספר כבר בעריכה בלשונית או בחלון אחר.',
   unsupported_context: 'אפשר לתקן רק ספר טקסט מספריית אוצריא, בתצוגת מפרשים בצד או מתחת (לא בצורת הדף).',
   storage_failed: 'אוצריא לא הצליחה לקרוא או לשמור את הטיוטה כעת. הטיוטה לא השתנתה; נסו שוב.',
@@ -66,12 +74,12 @@ function node(tag, className, text) {
   if (text !== undefined) item.textContent = text;
   return item;
 }
-function button(label, action, { ghost = true, key, disabled = false, describe } = {}) {
+function button(label, action, { ghost = true, key, disabled = false, describe, local = false } = {}) {
   const item = node('button', ghost ? 'ghost' : '', label); item.type = 'button';
   if (key) item.dataset.focusKey = key;
   if (describe) item.setAttribute('aria-label', describe);
   item.disabled = disabled || busy;
-  item.addEventListener('click', () => run(action));
+  item.addEventListener('click', () => { diagnostics.record('ui.action', { name: key?.split(':')[0] ?? action.name }); return local ? action() : run(action); });
   return item;
 }
 async function confirm(title, content) {
@@ -82,16 +90,17 @@ async function confirm(title, content) {
   }
 }
 function showScreen(name, focus = false) {
-  if (![...mainScreens, 'report'].includes(name)) return;
+  if (![...mainScreens, 'report', 'replace', 'logs'].includes(name)) return;
+  diagnostics.record('ui.screen', { screen: name });
   screenScroll.set(currentScreen, el('panel').scrollTop ?? 0);
   if (name !== currentScreen) message();
   currentScreen = name;
   if (mainScreens.includes(name)) lastMainScreen = name;
-  for (const screen of [...mainScreens, 'report']) el(`screen-${screen}`).hidden = screen !== name;
+  for (const screen of [...mainScreens, 'report', 'replace', 'logs']) el(`screen-${screen}`).hidden = screen !== name;
   for (const screen of mainScreens) {
     const tab = el(`nav-${screen}`);
     tab.setAttribute('aria-selected', String(screen === name));
-    tab.tabIndex = screen === name || (name === 'report' && screen === lastMainScreen) ? 0 : -1;
+    tab.tabIndex = screen === name || (!mainScreens.includes(name) && screen === lastMainScreen) ? 0 : -1;
   }
   el('panel').scrollTop = screenScroll.get(name) ?? 0;
   if (focus && mainScreens.includes(name)) el(`nav-${name}`).focus();
@@ -105,19 +114,71 @@ function showScreen(name, focus = false) {
 function renderReport() {
   for (const id of ['report-details', 'report-type', 'report-email']) el(id).disabled = busy;
   el('report-send').disabled = busy || !String(el('report-details').value ?? '').trim();
+  el('report-logs').disabled = busy;
+  el('log-file').disabled = busy;
 }
 async function reportToDeveloper() {
   const details = String(el('report-details').value ?? '').trim();
   if (!details) { el('report-details').focus(); throw new Error('כתבו את תוכן הדיווח לפני השליחה.'); }
-  if (details.length > 5000) throw new Error('הדיווח יכול להכיל עד 5,000 תווים.');
+  if (details.length > 3000) throw new Error('תוכן הדיווח יכול להכיל עד 3,000 תווים, כדי להשאיר מקום ללוגים.');
   const email = reporterHasEmail === true ? '' : String(el('report-email').value ?? '').trim();
   if (email && el('report-email').checkValidity && !el('report-email').checkValidity()) throw new Error('כתובת המייל אינה תקינה.');
-  const result = await call('feedback.report', { details, reportType: el('report-type').value || 'bug', ...(email ? { reporterEmail: email } : {}) });
+  diagnostics.record('report.prepare');
+  const withLogs = await diagnostics.reportDetails(details);
+  const result = await call('feedback.report', { details: withLogs, reportType: el('report-type').value || 'bug', ...(email ? { reporterEmail: email } : {}) });
   if (result === 'sent' || result === 'queued') {
     el('report-details').value = '';
     message(result === 'sent' ? 'הדיווח למפתח נשלח דרך מערכת הדיווחים של אוצריא.' : 'הדיווח למפתח נשמר בתור של אוצריא ויישלח כשיתאפשר.', false);
   } else if (result === 'cancelled') message('שליחת הדיווח בוטלה. הנוסח נשמר כאן לעריכה.');
   else throw new Error('לא התקבל אישור לשליחת הדיווח. הנוסח נשמר; בדקו באוצריא לפני ניסיון נוסף.');
+}
+function invalidateReplacement(notice = '') {
+  replacePlan = null; replaceNotice = notice; renderReplace();
+}
+function openReplace(sessionId) {
+  el('replace-session').value = sessionId;
+  invalidateReplacement(); showScreen('replace'); el('replace-query').focus();
+}
+function renderReplace() {
+  const select = el('replace-session'), selected = select.value;
+  const active = [...controller.sessions.values()].filter(item => !item.ended);
+  select.replaceChildren(...active.map(item => {
+    const option = node('option', '', item.snapshot.bookId); option.value = item.snapshot.sessionId; return option;
+  }));
+  select.value = active.some(item => item.snapshot.sessionId === selected) ? selected : active[0]?.snapshot.sessionId ?? '';
+  if (replacePlan && (replacePlan.sessionId !== select.value || controller.sessions.get(select.value)?.snapshot.revision !== replacePlan.revision)) {
+    replacePlan = null; replaceNotice = 'הנוסח בקורא השתנה. הציגו התאמות מחדש לפני החלפה.';
+  }
+  for (const id of ['replace-session', 'replace-query', 'replace-with', 'replace-whole-words']) el(id).disabled = busy || !active.length;
+  el('replace-preview').disabled = busy || !active.length || !String(el('replace-query').value ?? '');
+  el('replace-apply').disabled = busy || !replacePlan?.occurrences;
+  el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.` :
+    replaceNotice || (active.length ? 'הציגו התאמות כדי לבדוק את הנוסח לפני ההחלפה.' : 'התחילו קודם עריכה של ספר בקורא כדי לחפש ולהחליף בו.');
+  el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
+  if (replacePlan?.previews.length > 20) el('replace-results').append(node('p', 'hint', 'מוצגות 20 הפסקאות הראשונות. ההחלפה תחול על כל ההתאמות שנספרו בספר.'));
+}
+async function previewReplacement() {
+  replacePlan = null; replaceNotice = '';
+  const sessionId = el('replace-session').value, live = controller.sessions.get(sessionId);
+  if (!live || live.ended) throw new Error('התחילו עריכה של הספר בקורא לפני חיפוש והחלפה.');
+  const { bookId, bookUid } = live.snapshot;
+  const book = await loadBook(call, { bookId, bookUid }, progress => {
+    if (progress.phase === 'content') message(`טוען את נוסח הספר לחיפוש… ${progress.loaded.toLocaleString('he-IL')} תווים`);
+  }, { includeRaw: true });
+  const snapshot = await controller.inspect(sessionId);
+  replacePlan = planReplacements(book, snapshot, { query: String(el('replace-query').value ?? ''),
+    replacement: String(el('replace-with').value ?? ''), wholeWords: el('replace-whole-words').checked });
+  message(replacePlan.occurrences ? 'התצוגה המקדימה מוכנה. בדקו אותה לפני החלפה.' : 'לא נמצאו התאמות לחיפוש בנוסח הנוכחי.');
+}
+async function applyReplacement() {
+  const plan = replacePlan;
+  if (!plan?.occurrences) throw new Error('הציגו התאמות לפני החלפה.');
+  if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.`)) return;
+  replacePlan = null;
+  const result = await controller.applyReplacements(plan);
+  replaceNotice = 'ההחלפה הוחלה. אפשר לבצע חיפוש נוסף בנוסח המעודכן.';
+  message(result.saved ? `${plan.occurrences} החלפות הוחלו בקורא ונשמרו בתוסף. לא נשלחו דיווחים.` :
+    `${plan.occurrences} החלפות הוחלו בקורא וממתינות לשמירת הטיוטה באוצריא. לא נשלחו דיווחים.`);
 }
 // One user operation at a time in this page; session operations are also
 // serialized inside the controller.
@@ -125,8 +186,11 @@ let operations = Promise.resolve();
 function run(action) {
   operations = operations.then(async () => {
     busy = true; render();
-    try { await action(); } catch (error) { notify(errorText(error), true); }
-    finally { busy = false; await reload().catch(error => message(error.message, true)); }
+    const began = Date.now();
+    diagnostics.record('operation.start', { name: action.name || 'anonymous' });
+    try { await action(); diagnostics.record('operation.ok', { durationMs: Date.now() - began }); }
+    catch (error) { diagnostics.error('operation.error', error); notify(errorText(error), true); }
+    finally { busy = false; await reload().catch(error => { diagnostics.error('reload.error', error); message(error.message, true); }); diagnostics.flush(); }
   });
   return operations;
 }
@@ -153,6 +217,7 @@ async function reload() {
       } while (reloadAgain);
     } finally { reloading = null; }
     scheduleRender();
+    sendVisibility.sync(state, controller.sessions, controller.activeElsewhere).catch(error => message(`לא ניתן לעדכן את סמל השליחה: ${error.message}`, true));
     syncMarks();
   })();
   return reloading;
@@ -314,9 +379,13 @@ function samePeers(book, item) {
 }
 async function mergeParagraph(bookUid, items) {
   const live = liveFor(bookUid);
-  if (!live) throw new Error('כדי לאחד, התחילו קודם עריכה של הספר בקורא (לחיצה ימנית ← „תיקון הספר בקורא”).');
   const merged = mergeProposals(items[0].originalText, items.map(item => item.proposedText));
   if (merged === null) throw new Error(`ההצעות לפסקה ${items[0].sectionIndex + 1} משנות את אותן מילים, ולכן אי אפשר לאחד אותן אוטומטית. ערכו את הפסקה בקורא ובחרו נוסח אחד.`);
+  if (!live) {
+    await store.saveMergedProposal(bookUid, items, merged);
+    message('ההצעות אוחדו ונשמרו בתוסף. ההצעה המאוחדת ממתינה לשליחה.', false, 6000);
+    return;
+  }
   const { sectionIndex, originalSourceText, originalText } = items[0];
   await controller.restore(live.snapshot.sessionId, [{ sectionIndex, originalSourceText, originalText, proposedText: merged }]);
   // The originals stay listed until the merged wording is saved.
@@ -399,6 +468,7 @@ function renderLive() {
     if (!item.ended) {
       const actions = node('div', 'actions');
       actions.append(button('חזרה לקורא', () => activateTab(snapshot.tabId), { key: `go:${snapshot.sessionId}`, ghost: false }),
+        button('חיפוש והחלפה', () => openReplace(snapshot.sessionId), { key: `replace:${snapshot.sessionId}`, local: true }),
         button('שמירה ושליחה', () => sendItems(snapshot.bookUid, snapshot.changes.map(change => change.sectionIndex)),
           { key: `send-live:${snapshot.sessionId}`, disabled: !snapshot.changes.length }),
         button('סיום עריכה', async () => { await controller.end(snapshot.sessionId); message('העריכה הסתיימה והתיקונים נקלטו בתוסף.', false, 5000); }, { key: `end:${snapshot.sessionId}` }));
@@ -466,10 +536,9 @@ function renderBooks() {
         if (peers.length > 1 && peers[0] === item) {
           const note = node('div', 'row');
           note.append(node('span', 'grow reason', `לפסקה זו יש ${peers.length} הצעות נפרדות. מומלץ לאחד אותן לדיווח אחד.`),
-            button('איחוד לדיווח אחד', () => mergeParagraph(book.bookUid, peers), { key: `merge:${item.key}`, disabled: !live,
-              describe: `איחוד ${peers.length} ההצעות לפסקה ${item.sectionIndex + 1} לנוסח אחד בקורא` }));
+            button('איחוד לדיווח אחד', () => mergeParagraph(book.bookUid, peers), { key: `merge:${item.key}`,
+              describe: `איחוד ${peers.length} ההצעות לפסקה ${item.sectionIndex + 1} לנוסח אחד` }));
           view.append(note);
-          if (!live) view.append(node('p', 'hint', 'כדי לאחד, התחילו קודם עריכה של הספר בקורא.'));
         }
         if (uncertain(item, book.bookUid)) view.append(node('p', 'reason', 'העריכה הסתיימה בלי שהתוסף קיבל את מצבה הסופי; ייתכן שהתיקון בוטל בקורא. לפני שליחה תתבקשו לאשר.'));
         if (item.idConflict) view.append(node('p', 'reason', 'מזהה הדיווח כבר שייך לתוכן אחר. שליחה תבקש את אישורכם ליצירת מזהה חדש.'));
@@ -569,12 +638,14 @@ function renderSettings() {
 }
 function render() {
   const focused = document.activeElement?.dataset?.focusKey;
-  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport();
+  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport(); renderReplace();
   el('refresh').disabled = busy;
   if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
 async function initialize(boot) {
   background = boot?.app?.runMode === 'background';
+  diagnostics.record('plugin.boot', { background, embedded: !!boot?.reader?.embedded });
+  await diagnostics.start();
   applyTheme(boot?.theme);
   embedded = boot?.reader?.embedded ? boot.reader : null;
   el('embedded-notice').hidden = !embedded;
@@ -608,24 +679,54 @@ for (const [index, screen] of mainScreens.entries()) {
     if (next !== undefined) { event.preventDefault(); showScreen(mainScreens[next], true); }
   });
 }
-el('nav-report').addEventListener('click', () => { showScreen('report'); el('report-details').focus(); });
+el('nav-report').addEventListener('click', () => {
+  showScreen('report');
+  if (el('report-details').disabled) operations.then(() => { if (currentScreen === 'report') el('report-details').focus(); });
+  else el('report-details').focus();
+});
 el('report-back').addEventListener('click', () => showScreen(lastMainScreen, true));
 el('report-details').addEventListener('input', () => { if (currentScreen === 'report') message(); renderReport(); });
 el('report-send').addEventListener('click', () => { afterBoot(() => run(reportToDeveloper)).catch(error => notify(errorText(error), true)); });
+el('report-logs').addEventListener('click', () => afterBoot(() => run(async () => {
+  const files = await diagnostics.files();
+  el('log-file').replaceChildren();
+  const all = node('option', '', 'כל הלוגים הזמינים'); all.value = ''; el('log-file').append(all);
+  for (const file of files) { const option = node('option', '', file.path); option.value = file.path; el('log-file').append(option); }
+  el('log-file').value = '';
+  el('log-folder-status').textContent = files.length ? `${files.length} קובצי לוג זמינים בתיקייה.` : 'קובצי הלוג אינם זמינים כרגע. מוצג עותק האבחון השמור בתוסף.';
+  el('log-content').value = await diagnostics.exportText();
+  showScreen('logs'); el('log-content').focus();
+})).catch(error => notify(errorText(error), true)));
+el('log-file').addEventListener('change', () => afterBoot(() => run(async () => {
+  el('log-content').value = el('log-file').value ? await diagnostics.readFile(el('log-file').value) : await diagnostics.exportText();
+})).catch(error => notify(errorText(error), true)));
+el('logs-back').addEventListener('click', () => { showScreen('report'); el('report-logs').focus(); });
+for (const id of ['replace-query', 'replace-with']) el(id).addEventListener('input', () => invalidateReplacement());
+for (const id of ['replace-session', 'replace-whole-words']) el(id).addEventListener('change', () => invalidateReplacement());
+el('replace-preview').addEventListener('click', () => { afterBoot(() => run(previewReplacement)).catch(error => notify(errorText(error), true)); });
+el('replace-apply').addEventListener('click', () => { afterBoot(() => run(applyReplacement)).catch(error => notify(errorText(error), true)); });
+el('replace-back').addEventListener('click', () => showScreen('work', true));
 el('refresh').addEventListener('click', () => run(async () => { await refreshTabs(); await controller.recoverOrphans(); }));
 el('embedded-native').addEventListener('click', () => run(async () => {
   await call('reader.setDefaultTextReader', { enabled: false }).catch(() => {});
   if (embedded) await call('reader.openBook', { bookId: embedded.bookId, ...(embedded.id != null ? { id: embedded.id } : {}), index: embedded.currentIndex ?? 0, reader: 'native' });
 }));
 if (host) {
-  host.on('theme.changed', applyTheme);
-  host.on('contextMenu.itemClicked', event => requestEdit(event, false));
-  host.on('reader.toolbar_item_clicked', event => requestEdit(event, true));
+  const onHost = (name, handler) => host.on(name, event => {
+    diagnostics.record('host.event', { name, revision: event?.revision, sectionIndex: event?.sectionIndex, reason: event?.reason });
+    return handler(event);
+  });
+  onHost('theme.changed', applyTheme);
+  onHost('contextMenu.itemClicked', event => requestEdit(event, false));
+  onHost('reader.toolbar_item_clicked', event => requestEdit(event, true));
   // Session events queue behind boot; nothing is acknowledged before saving.
-  host.on('reader.correctionSessionChanged', event => { afterBoot(() => controller.changed(event)).catch(error => message(errorText(error), true)); });
-  host.on('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => message(errorText(error), true)); });
-  host.on('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(() => {}); });
-  host.on('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(() => {}); });
-  host.on('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => message(errorText(error), true)); });
+  onHost('reader.correctionSessionChanged', event => { afterBoot(() => controller.changed(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
+  onHost('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
+  onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); });
+  onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); });
+  onHost('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => { diagnostics.error('initialize.error', error); message(errorText(error), true); }); });
   if (host._booted) { initialized ??= initialize(); startInitialization(); initialized.catch(error => message(errorText(error), true)); }
 } else message('יש לפתוח את התוסף מתוך אוצריא.');
+window.addEventListener?.('error', event => { diagnostics.error('javascript.error', event.error); diagnostics.flush(); });
+window.addEventListener?.('unhandledrejection', event => { diagnostics.error('promise.error', event.reason); diagnostics.flush(); });
+document.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') diagnostics.flush(); });

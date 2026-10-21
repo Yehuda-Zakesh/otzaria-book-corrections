@@ -36,6 +36,7 @@
           "id": "send-book-corrections",
           "title": "שליחת תיקוני הספר",
           "icon": "send_24_regular",
+          "when": { "storage": { "key": "hasPendingCorrections", "equals": true } },
           "contexts": ["reader-text"]
         },
         {
@@ -52,6 +53,7 @@
           "id": "send-book-corrections",
           "title": "שליחת תיקוני הספר",
           "icon": "send_24_regular",
+          "when": { "storage": { "key": "hasPendingCorrections", "equals": true } },
           "contexts": ["reader-book", "reader-selection"]
         },
         {

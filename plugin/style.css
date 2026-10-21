@@ -16,9 +16,9 @@ section { max-width: 960px; margin-inline: auto; }
 .icon-button { padding: 8px; min-width: 36px; display: inline-flex; align-items: center; justify-content: center; }
 .report-form label { display: block; margin-block: 16px 6px; font-weight: 500; }
 .report-form label:first-child { margin-top: 0; }
-textarea, select, input[type="email"] { width: 100%; padding: 12px; border: 1px solid var(--outline); border-radius: 8px; background: var(--surface); color: var(--onSurface); font: 14px/1.6 var(--font-ui); }
+textarea, select, input[type="email"], input[type="text"] { width: 100%; padding: 12px; border: 1px solid var(--outline); border-radius: 8px; background: var(--surface); color: var(--onSurface); font: 14px/1.6 var(--font-ui); }
 textarea { resize: vertical; min-height: 160px; }
-textarea:focus-visible, select:focus-visible, input[type="email"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+textarea:focus-visible, select:focus-visible, input[type="email"]:focus-visible, input[type="text"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 h2 { font-size: 16px; font-weight: 600; margin: 20px 0 8px; }
 h3 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
 h4 { font-size: 14px; font-weight: 600; margin: 16px 0 4px; }

@@ -72,6 +72,24 @@
       <p class="hint contact-note">הדיווחים מזוהים באמצעות כתובת המייל שבהגדרות דיווח השגיאות באוצריא. הודעה לאחר אישור תלויה במערכת הדיווחים באתר ובהעדפות המייל שלכם.</p>
     </section>
     </div>
+    <div id="screen-replace" hidden>
+      <section aria-labelledby="replace-title">
+        <h2 id="replace-title">חיפוש והחלפה</h2>
+        <p class="hint">חיפוש מדויק של מילה או ביטוי בנוסח הנוכחי, כולל תיקונים שכבר נעשו. החיפוש כולל ניקוד ומוגבל לכל פסקה בנפרד.</p>
+        <div class="card report-form">
+          <label for="replace-session">הספר שבעריכה</label>
+          <select id="replace-session"></select>
+          <label for="replace-query">חיפוש</label>
+          <input id="replace-query" type="text" maxlength="500" autocomplete="off" placeholder="מילה אחת או ביטוי לחיפוש">
+          <label for="replace-with">החלפה ב־</label>
+          <input id="replace-with" type="text" maxlength="20000" autocomplete="off" placeholder="הנוסח החדש (אפשר להשאיר ריק למחיקה)">
+          <label class="row setting" for="replace-whole-words"><span class="grow">מילים שלמות בלבד</span><input id="replace-whole-words" type="checkbox" checked></label>
+          <div class="actions"><button id="replace-preview" type="button" disabled>הצגת התאמות</button><button id="replace-apply" type="button" disabled>החלפת כל ההתאמות</button><button id="replace-back" class="ghost" type="button">חזרה לתיקונים</button></div>
+        </div>
+        <p id="replace-summary" role="status" aria-live="polite" class="hint"></p>
+        <div id="replace-results"></div>
+      </section>
+    </div>
     <div id="screen-report" hidden>
       <section aria-labelledby="report-title">
         <h2 id="report-title">דיווח למפתח התוסף</h2>
@@ -80,13 +98,27 @@
           <label for="report-type">סוג הדיווח</label>
           <select id="report-type"><option value="bug">תקלה בתוסף</option><option value="other">הצעה או פנייה אחרת</option></select>
           <label for="report-details">תוכן הדיווח</label>
-          <textarea id="report-details" rows="7" maxlength="5000" placeholder="מה ניסיתם לעשות, מה קרה ומה ציפיתם שיקרה?"></textarea>
+          <textarea id="report-details" rows="7" maxlength="3000" placeholder="מה ניסיתם לעשות, מה קרה ומה ציפיתם שיקרה?"></textarea>
+          <p class="hint">עד 3,000 תווים. לדיווח יצורפו אוטומטית לוגים של פעולות, זמני תגובה ושגיאות, ללא תוכן ספרים, נוסחי תיקונים או כתובות מייל. בשל מגבלת הדיווח יצורף תקציר; הלוגים המפורטים זמינים בתיקיית הלוגים.</p>
           <div id="report-email-area" hidden>
             <label for="report-email">כתובת מייל לחזרה (לא חובה)</label>
             <input id="report-email" type="email" dir="ltr" autocomplete="email">
           </div>
           <p id="report-email-note" class="hint">אוצריא תשתמש בכתובת המייל השמורה בהגדרות הדיווח, אם הוגדרה.</p>
-          <div class="actions"><button id="report-send" type="button" disabled>שליחת דיווח למפתח</button><button id="report-back" class="ghost" type="button">חזרה</button></div>
+          <div class="actions"><button id="report-send" type="button" disabled>שליחת דיווח למפתח</button><button id="report-logs" class="ghost" type="button">תיקיית הלוגים</button><button id="report-back" class="ghost" type="button">חזרה</button></div>
+        </div>
+      </section>
+    </div>
+    <div id="screen-logs" hidden>
+      <section aria-labelledby="logs-title">
+        <h2 id="logs-title">תיקיית הלוגים</h2>
+        <p class="hint">קובצי הלוג נשמרים בתיקייה הפרטית של התוסף: <bdi dir="ltr">logs/</bdi>. אפשר לבחור קובץ ולהעתיק את תוכנו. נשמרים עד שישה מופעים, עד 250 אירועים לכל מופע. לפתיחת התיקייה בסייר הקבצים נדרשת תמיכה נוספת באוצריא.</p>
+        <div class="card report-form">
+          <p id="log-folder-status" class="hint" role="status"></p>
+          <label for="log-file">קובץ לוג</label><select id="log-file"></select>
+          <label for="log-content">תוכן הלוג — לקריאה ולהעתקה</label>
+          <textarea id="log-content" rows="16" dir="ltr" readonly spellcheck="false"></textarea>
+          <div class="actions"><button id="logs-back" class="ghost" type="button">חזרה לדיווח</button></div>
         </div>
       </section>
     </div>

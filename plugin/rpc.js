@@ -1,4 +1,4 @@
-export function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+export function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), onRetry = () => {} } = {}) {
   const urgent = [], normal = [];
   let running = 0, background = 0, pumping = false;
   let startGate = Promise.resolve(), hasStarted = false;
@@ -21,7 +21,10 @@ export function createRpcCall(host, { interval = 20, retryDelay = 100, sleep = m
       }
       if (result.success) return result.data;
       const code = result.error?.code?.replace(/^error\./, '');
-      if (code === 'rate_limited' && attempt < 3) { await sleep(retryDelay * (attempt + 1)); continue; }
+      if (code === 'rate_limited' && attempt < 3) {
+        try { if (!method.startsWith('storage.') && !method.startsWith('fs.')) onRetry({ method, attempt: attempt + 1, delayMs: retryDelay * (attempt + 1), code }); } catch { /* Diagnostics cannot break retries. */ }
+        await sleep(retryDelay * (attempt + 1)); continue;
+      }
       const error = new Error(code === 'permission_denied'
         ? 'חסרה הרשאה לתוסף. הפעילו אותה בניהול התוספים.'
         : code === 'rate_limited' ? 'אוצריא מגבילה זמנית את קצב הבקשות. נסו שוב בעוד רגע.'

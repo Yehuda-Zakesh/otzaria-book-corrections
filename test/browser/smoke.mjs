@@ -105,7 +105,12 @@ const draft = { draftId: 'd-id:1', bookUid: 'id:1', bookId: 'ספר הבדיקה
 host.drafts.set(draft.draftId, draft); host.nextVersion = 8;
 window.tab = host.openTab('id:1');
 const contract = host.instance(storage);
+window.logFiles = new Map();
 const extra = {
+  'fs.writeFile': ({ path, content }) => { logFiles.set(path, content); return { path, size: content.length }; },
+  'fs.readFile': ({ path }) => ({ content: logFiles.get(path) }),
+  'fs.listDir': () => ({ entries: [...logFiles].map(([path, content]) => ({ path, type: 'file', size: content.length, modified: new Date().toISOString() })) }),
+  'fs.deleteEntry': ({ path }) => logFiles.delete(path),
   'reader.getCurrentState': () => ({ currentTabId: null, openTabs: [...host.tabs].map(([tabId, bookUid]) => ({ tabId, bookUid, id: 1, bookId: 'ספר הבדיקה', book: 'ספר הבדיקה', type: 'text',
     correctionSessionId: [...host.sessions.values()].find(s => !s.ended && s.tabId === tabId)?.sessionId ?? null })) }),
   'reader.activateTab': ({ index }) => { window.activated = index; return true; },
@@ -266,6 +271,7 @@ for (const mode of ['dark', 'light', 'dark', 'light']) {
 await click('#nav-report');
 await waitFor("document.getElementById('report-email-area').hidden", 'saved email used without exposing it');
 assert.equal(await evaluate("!document.getElementById('screen-report').hidden && document.getElementById('screen-history').hidden"), true);
+await waitFor("!document.getElementById('report-details').disabled && document.activeElement.id === 'report-details'", 'report field ready and focused');
 await call('Input.insertText', { text: 'תקלה בתוסף: בדיקת הממשק בלבד' });
 await waitFor("!document.getElementById('report-send').disabled", 'report text entered');
 await capture('plugin-report-light');
@@ -273,6 +279,23 @@ await click('#report-send');
 await waitFor("/בוטלה/.test(document.getElementById('status').textContent)", 'host cancellation');
 await waitFor("!document.getElementById('report-send').disabled", 'report action released after cancellation');
 assert.equal(await evaluate("document.getElementById('report-details').value"), 'תקלה בתוסף: בדיקת הממשק בלבד', 'cancel preserves the draft');
+assert.equal(await evaluate("developerReports[0].details.includes('Plugin diagnostics') && developerReports[0].details.length <= 5000"), true, 'diagnostics attached within host limit');
+await click('#report-logs');
+await waitFor("!document.getElementById('screen-logs').hidden && !document.getElementById('log-file').disabled", 'log folder opened');
+assert.equal(await evaluate("document.getElementById('log-content').readOnly"), true, 'log files cannot be edited accidentally');
+assert.equal(await evaluate("document.getElementById('log-file').options.length > 1"), true, 'private log files listed');
+assert.equal(await evaluate("document.getElementById('log-content').value.includes('rpc.ok')"), true, 'detailed RPC log visible');
+assert.equal(await evaluate("document.getElementById('report-details').value"), 'תקלה בתוסף: בדיקת הממשק בלבד');
+await click('#log-content');
+await call('Input.dispatchKeyEvent', { type: 'keyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+await call('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: 2 });
+assert.equal(await evaluate("document.getElementById('log-content').selectionEnd === document.getElementById('log-content').value.length"), true, 'keyboard selection for copying logs');
+await capture('plugin-logs-light');
+await theme('dark'); await capture('plugin-logs-dark'); await theme('light');
+await evaluate("document.getElementById('log-file').selectedIndex = 1; document.getElementById('log-file').dispatchEvent(new Event('change', { bubbles: true }))");
+await waitFor("!document.getElementById('log-file').disabled && !JSON.parse(document.getElementById('log-content').value).instances", 'individual file opened');
+await click('#logs-back');
+assert.equal(await evaluate("!document.getElementById('screen-report').hidden"), true, 'back to report');
 await evaluate("window.reportMode = 'queued'");
 await click('#report-send');
 await waitFor("/הדיווח למפתח נשמר בתור/.test(document.getElementById('status').textContent)", 'developer report queued');
@@ -303,6 +326,13 @@ await createCorrectionStore(createFakeOtzaria().instance(seed)).resolve('id:1', 
   result: { reportId: 'bc-saved-history', nativeReportId: 'native-saved', reportKind: 'text_correction', correctionSupported: true, duplicate: false, status: 'sent' },
   sectionIndex: 4, originalText: 'פסקה 5 בספר הבדיקה', proposedText: 'פסקה 5 בספר הבדיקה — מתוקן', title: 'ספר ההיסטוריה' });
 const [[savedKey, savedRecord]] = [...seed.data];
+// Independent proposals can be merged without opening a reader session.
+const offlineStore = createCorrectionStore(createFakeOtzaria().instance(seed));
+for (const [version, proposedText] of [[1, 'אלף ביתא גימל דלת'], [2, 'אלף בית גימל דלת!']]) {
+  await offlineStore.saveVersion({ bookUid: 'id:offline', bookId: 'ספר לאיחוד ללא קורא', libraryVersion: 'qa',
+    draftId: `offline-${version}`, version, conflicts: [], changes: [0, 1].map(sectionIndex => ({
+      sectionIndex, originalSourceText: 'אלף בית גימל דלת', originalText: 'אלף בית גימל דלת', proposedText })) });
+}
 let seedScript = null;
 async function openWith(entries, reload) {
   if (seedScript) await call('Page.removeScriptToEvaluateOnNewDocument', { identifier: seedScript });
@@ -324,6 +354,21 @@ async function openWith(entries, reload) {
 }
 const kept = await openWith([...seed.data], false);
 await openWith(kept, true);
+await waitFor("document.querySelector('[data-focus-key^=\"merge:\"]') && !document.querySelector('[data-focus-key^=\"merge:\"]').disabled", 'offline merge enabled');
+await theme('light');
+await click('[data-focus-key^="merge:"]');
+await waitFor("/ההצעות אוחדו ונשמרו בתוסף/.test(document.getElementById('status').textContent) && !document.getElementById('refresh').disabled", 'offline merge saved');
+assert.equal(await evaluate("host.sessions.size"), 0, 'offline merge opens no reader session');
+assert.equal(await evaluate("host.submissions.size"), 0, 'offline merge sends nothing');
+await theme('dark');
+await evaluate("document.querySelector('[data-focus-key^=\"merge:\"]').focus()");
+assert.equal(await evaluate("document.activeElement.dataset.focusKey.startsWith('merge:')"), true, 'offline merge keyboard focus');
+await key('Enter');
+await waitFor("!document.querySelector('[data-focus-key^=\"merge:\"]') && !document.getElementById('refresh').disabled", 'second offline merge from keyboard');
+assert.equal(await evaluate("[...storage.data.keys()].filter(k => k.startsWith('nc:merged:')).length"), 2);
+assert.equal(await evaluate("[...storage.data.values()].filter(v => v?.replacedKeys).every(v => v.changes[0].proposedText === 'אלף ביתא גימל דלת!')"), true, 'combined wording stored');
+assert.equal(await evaluate("document.getElementById('book-list').textContent.includes('ביתא') && document.getElementById('book-list').textContent.includes('!')"), true, 'both edits displayed in diff');
+await capture('plugin-offline-merge-dark');
 await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
 await evaluate("document.getElementById('panel').scrollTop = 0");
 assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'no horizontal overflow on a narrow page');

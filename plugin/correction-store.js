@@ -10,6 +10,7 @@ export const PREFIX = 'nc:';
 const ENTRY = `${PREFIX}e:`, INHERITED = `${PREFIX}inh:`, RESOLVED = `${PREFIX}r:`;
 const SUBMISSION = `${PREFIX}sub:`, FLOOR = `${PREFIX}floor:`;
 const SESSION = `${PREFIX}s:`, FINAL = `${PREFIX}fin:`, INTENT = `${PREFIX}intent:`, INTENT_DONE = `${PREFIX}intent-done:`;
+const MERGED = `${PREFIX}merged:`;
 export const SCHEMA = 1;
 const hash = value => reportSha256(JSON.stringify(value)).slice(0, 40);
 const keyPart = value => encodeURIComponent(String(value));
@@ -122,6 +123,31 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
       await setOnce(`${RESOLVED}${keyPart(bookUid)}:${itemKey}:${status}`,
         { schema: SCHEMA, bookUid, itemKey, status, at: now(), ...data });
     },
+    /** One immutable write publishes the merged proposal and replaces exactly
+     * its inputs. A failed write leaves all original proposals available. */
+    async saveMergedProposal(bookUid, items, proposedText) {
+      const book = (await store.load()).books.get(bookUid);
+      if (items.length < 2 || items.some(item => !book?.pending.some(p => p.key === item.key)) ||
+          items.some(item => item.sectionIndex !== items[0].sectionIndex ||
+            item.originalSourceText !== items[0].originalSourceText || item.originalText !== items[0].originalText)) {
+        throw new Error('ההצעות השתנו. רעננו ונסו לאחד שוב.');
+      }
+      if (typeof proposedText !== 'string') throw new Error('נוסח האיחוד אינו תקין.');
+      const change = copyChange({ ...items[0], proposedText });
+      const id = hash(['merge', bookUid, items.map(item => item.key).sort(), proposedText]);
+      const key = `${MERGED}${keyPart(bookUid)}:${id}`;
+      const version = await newestStoredVersion(call, bookUid) + 1;
+      const value = { schema: SCHEMA, bookUid, bookId: book.bookId, libraryVersion: book.libraryVersion,
+        draftId: `merge-${id}`, version, sessionId: null, revision: null,
+        changes: proposedText === change.originalText ? [] : [change], conflicts: [], savedAt: now(),
+        replacedKeys: items.map(item => item.key).filter(key => key !== changeKey(bookUid, change)) };
+      await setOnce(key, value);
+      const stored = await call('storage.get', { key });
+      if (!stored || JSON.stringify(stored.changes) !== JSON.stringify(value.changes) ||
+          JSON.stringify(stored.replacedKeys) !== JSON.stringify(value.replacedKeys)) {
+        throw new Error('שמירת ההצעה המאוחדת לא אומתה. רעננו לפני ניסיון נוסף.');
+      }
+    },
     async recordSubmission(bookUid, itemKey, reportId, status, data = {}) {
       if (!submissionStatuses.has(status)) throw new Error(`Unknown submission status ${status}`);
       await setOnce(`${SUBMISSION}${keyPart(bookUid)}:${itemKey}:${keyPart(reportId)}:${status}`,
@@ -143,6 +169,7 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
       await setOnce(`${FLOOR}${keyPart(bookUid)}:${floor}`, { schema: SCHEMA, bookUid, version: floor });
       let removed = 0;
       for (const entry of book.entries) {
+        if (entry.key.startsWith(MERGED)) continue; // Also contains durable resolutions.
         if (entry.version > floor) continue;
         try { await call('storage.remove', { key: entry.key }); removed++; } catch { /* retried next time */ }
       }
@@ -153,7 +180,7 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
 }
 
 async function newestStoredVersion(call, bookUid) {
-  const versions = (await readAll(call)).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR)) &&
+  const versions = (await readAll(call)).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR) || key.startsWith(MERGED)) &&
     value.bookUid === bookUid && Number.isSafeInteger(value.version)).map(({ value }) => value.version);
   return versions.length ? Math.max(...versions) : 0;
 }
@@ -179,8 +206,12 @@ export function mergeRecords(records) {
   };
   const push = (map, key, value) => { if (!map.has(key)) map.set(key, []); map.get(key).push(value); };
   for (const { key, value } of records) {
-    if (key.startsWith(ENTRY) && Number.isSafeInteger(value.version) && Array.isArray(value.changes) && Array.isArray(value.conflicts)) {
-      book(value.bookUid, value.bookId).entries.push({ ...value, key });
+    if ((key.startsWith(ENTRY) || key.startsWith(MERGED)) && Number.isSafeInteger(value.version) && Array.isArray(value.changes) && Array.isArray(value.conflicts)) {
+      const item = book(value.bookUid, value.bookId);
+      item.entries.push({ ...value, key });
+      if (key.startsWith(MERGED)) for (const itemKey of value.replacedKeys ?? []) {
+        push(item.resolutions, itemKey, { schema: SCHEMA, bookUid: value.bookUid, itemKey, status: 'merged', at: value.savedAt });
+      }
     } else if (key.startsWith(FLOOR) && Number.isSafeInteger(value.version)) {
       const item = book(value.bookUid); item.floor = Math.max(item.floor, value.version);
     } else if (key.startsWith(INHERITED)) {

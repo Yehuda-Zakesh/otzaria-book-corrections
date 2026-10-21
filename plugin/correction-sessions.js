@@ -137,6 +137,26 @@ export function createSessionController({ call, store, onChange = () => {}, onNo
         return { snapshot, ...result };
       });
     },
+    inspect(sessionId) {
+      return enqueue(async () => { const snapshot = await latest(sessionId); onChange(); return snapshot; });
+    },
+    applyReplacements(plan) {
+      return enqueue(async () => {
+        const current = await latest(plan.sessionId);
+        if (current.revision !== plan.revision) {
+          onChange();
+          throw Object.assign(new Error('הנוסח בקורא השתנה. הציגו התאמות מחדש לפני החלפה.'), { code: 'error.revision_conflict' });
+        }
+        if (current.bookUid !== plan.bookUid || current.libraryVersion !== plan.libraryVersion) {
+          throw Object.assign(new Error('מקור הספר השתנה.'), { code: 'error.source_changed' });
+        }
+        const snapshot = await call('reader.restoreCorrectionDraft', { sessionId: plan.sessionId, bookUid: plan.bookUid,
+          libraryVersion: plan.libraryVersion, expectedRevision: plan.revision, changes: plan.changes });
+        track(snapshot); onChange();
+        try { return { snapshot, ...await keep(snapshot) }; }
+        catch (error) { throw new Error(`ההחלפה הוחלה בקורא, אך השמירה בתוסף נכשלה. הטיוטה נשארה באוצריא: ${error.message}`); }
+      });
+    },
     reset(sessionId, sectionIndex) {
       return enqueue(async () => {
         const current = await latest(sessionId);

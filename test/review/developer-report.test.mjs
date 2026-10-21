@@ -30,7 +30,8 @@ for (const response of ['sent', 'queued']) {
     page.el('report-email').value = 'stale-optional@example.com';
     page.el('report-send').click();
     await waitFor(() => reports.length === 1 && !page.el('report-details').disabled, `${response} response handled`);
-    assert.equal(reports[0].details, 'תיאור תקלה למפתח בלבד');
+    assert.ok(reports[0].details.startsWith('תיאור תקלה למפתח בלבד\n\n--- Plugin diagnostics'));
+    assert.ok(reports[0].details.length <= 5000);
     assert.equal(reports[0].reportType, 'bug');
     assert.equal(Object.hasOwn(reports[0], 'reporterEmail'), false, 'saved host email takes precedence over a stale optional field');
     assert.equal(page.el('report-details').value, '');
