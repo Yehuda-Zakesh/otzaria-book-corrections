@@ -12,7 +12,7 @@ function crc32(buffer) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 await build();
-const names = ['manifest.json', 'index.html', 'style.css', 'app.bundle.js'];
+const names = ['manifest.json', 'index.html', 'style.css', 'app.bundle.js', 'FLUENT-ICONS-LICENSE.txt'];
 const manifest = JSON.parse(await readFile('plugin/manifest.json', 'utf8'));
 const local = [], central = [];
 let offset = 0;

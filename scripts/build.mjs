@@ -5,7 +5,7 @@ import { Script } from 'node:vm';
 
 // Bundle order; app.js is the entry. watch.mjs uses the same list.
 export const MODULES = ['report-digest.js', 'changes.js', 'book.js', 'draft-storage.js', 'rpc.js',
-  'correction-store.js', 'correction-sessions.js', 'correction-submit.js', 'legacy-drafts.js', 'text-diff.js', 'reader-marks.js', 'app.js'];
+  'correction-store.js', 'correction-sessions.js', 'correction-submit.js', 'legacy-drafts.js', 'text-diff.js', 'book-format.js', 'reader-marks.js', 'app.js'];
 const local = MODULES.map(name => name.replace(/\.js$/, '').replace(/[-.]/g, '\$&')).join('|');
 
 // This deliberately supports only this project's local modules. Unexpected module

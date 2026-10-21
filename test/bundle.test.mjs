@@ -60,7 +60,7 @@ async function waitFor(predicate, label) {
   assert.fail('timed out: ' + label);
 }
 
-test('bundle policy: Otzaria 0.9.99 contract only, no direct network path', async () => {
+test('bundle policy: Otzaria 0.9.98 with correction APIs, no direct network path', async () => {
   const bundle = await build();
   for (const method of ['reader.beginCorrectionSession', 'reader.acknowledgeCorrectionDraft', 'reader.listCorrectionDrafts',
     'reader.getCorrectionDraft', 'feedback.submitBookCorrection', 'requireTextCorrection']) assert.ok(bundle.includes(method), method);
@@ -119,9 +119,11 @@ test('sending from the page uses requireTextCorrection and shows queued honestly
   const host = createFakeOtzaria(), page = await plugin({ host });
   await page.boot();
   await page.emit('contextMenu.itemClicked', { itemId: 'correct-book', selection: { tabId: host.openTab('id:1') } });
+  await waitFor(() => host.sessions.size === 1, 'session available before editing');
   const [session] = host.sessions.values();
   await page.emit('reader.correctionSessionChanged', host.edit(session.sessionId, 1, 'בית גימל!'));
   host.submitMode = 'queued';
+  await waitFor(() => [...page.el('live-list').walk()].some(item => item.textContent === 'שמירה ושליחה' && !item.disabled), 'send action enabled');
   const send = [...page.el('live-list').walk()].find(item => item.textContent === 'שמירה ושליחה');
   send.click();
   await waitFor(() => /טרם נשלחו לאתר/.test(page.el('status').textContent), 'queued status');

@@ -40,6 +40,7 @@ test('structured submission requires text_correction and records sent status', a
   assert.equal(result.status, 'sent');
   assert.equal(deliveryLabel(result.record), 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע');
   assert.deepEqual((await reload(store)).pending, []);
+  assert.equal((await reload(store)).history[0].originalSourceText, item.originalSourceText, 'source formatting survives in delivery history');
   // Never resent once confirmed.
   const again = await submitItem({ call, store, book, item: (await reload(store)).handled[0] });
   assert.equal(again.status, 'already');

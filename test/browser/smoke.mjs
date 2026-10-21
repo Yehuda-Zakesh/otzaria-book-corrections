@@ -1,9 +1,9 @@
 // Chrome smoke test of the review page with a contract-model SDK (not the
-// host). No screenshots: real captures are taken only with Otzaria itself.
+// host). Fixture screenshots show the plugin UI, not the native Otzaria app.
 import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { createCorrectionStore } from '../../plugin/correction-store.js';
 import { createFakeOtzaria, createStorage } from '../fake-otzaria.mjs';
 // Every colorScheme field Otzaria sends (buildThemePayloadFromScheme in
@@ -52,7 +52,8 @@ async function click(selector) {
   const box = await evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: "center" }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
   for (const type of ['mousePressed', 'mouseReleased']) await call('Input.dispatchMouseEvent', { type, x: box.x, y: box.y, button: 'left', clickCount: 1 });
 }
-const key = async (name, code = name) => { for (const type of ['keyDown', 'keyUp']) await call('Input.dispatchKeyEvent', { type, key: name, code, windowsVirtualKeyCode: name === 'Tab' ? 9 : 13 }); };
+const key = async (name, code = name) => { for (const type of ['keyDown', 'keyUp']) await call('Input.dispatchKeyEvent', { type, key: name, code, windowsVirtualKeyCode: ({ Tab: 9, Enter: 13, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35 })[name],
+  ...(type === 'keyDown' && name === 'Enter' ? { text: '\r' } : {}) }); };
 // Switches theme as the host does and checks no stylesheet colour is left over.
 async function theme(mode) {
   await evaluate(`mockHandlers['theme.changed']({ mode: '${mode}', colorScheme: palettes.${mode} })`);
@@ -79,6 +80,7 @@ await call('Page.addScriptToEvaluateOnNewDocument', { source: `${contractModel}
 window.mockHandlers = {};
 const lines = Array.from({ length: 40 }, (_, i) => 'פסקה ' + (i + 1) + ' בספר הבדיקה');
 lines[1] = '<b>בית</b> גימל';
+lines[10] = '<b>פסקה 11</b> <i>בספר הבדיקה</i>';
 window.host = createFakeOtzaria({ books: { 'id:1': { bookId: 'ספר הבדיקה', lines } } });
 window.storage = createStorage();
 // 0.2.2 workspace (schema 2 inline) and an Otzaria draft whose end event was lost.
@@ -94,9 +96,10 @@ storage.data.set('book-session', { schemaVersion: 2, sessions: [{ id: 'old', boo
       submission: { reportId: 'legacy-sent-1', bookId: 'ספר ישן', bookUid: 'id:9', sectionIndex: 0, snapshots: [{ index: 0, text: 'אלף בית' }], original: 'בית', proposed: 'ביית',
         details: 'הצעת תיקון', allowQueue: false, forceFreeText: false, sourceStart: 4, sourceEnd: 7 },
       sent: true, sentAt: 1760000000000, correctionSupported: true, sourceSections: [0] }] }] });
+window.legacyKeys = [...storage.data.keys()];
 window.legacyBefore = JSON.stringify([...storage.data]);
 const draft = { draftId: 'd-id:1', bookUid: 'id:1', bookId: 'ספר הבדיקה', version: 7, acked: null, content: true, libraryVersion: '1', updatedAt: 1,
-  changes: Array.from({ length: 12 }, (_, i) => ({ sectionIndex: 10 + i, originalSourceText: lines[10 + i], originalText: lines[10 + i], proposedText: lines[10 + i] + ' — מתוקן' })),
+  changes: Array.from({ length: 12 }, (_, i) => ({ sectionIndex: 10 + i, originalSourceText: lines[10 + i], originalText: lines[10 + i].replace(/<[^>]*>/g, ''), proposedText: lines[10 + i].replace(/<[^>]*>/g, '') + ' — מתוקן' })),
   conflicts: [{ sectionIndex: 2, originalSourceText: lines[2], originalText: lines[2], proposedText: 'פסקה 3 מוצעת', reason: 'displaced' },
     { sectionIndex: 3, originalSourceText: 'נוסח ישן', originalText: 'נוסח ישן', proposedText: 'נוסח חדש', reason: 'source_changed' }] };
 host.drafts.set(draft.draftId, draft); host.nextVersion = 8;
@@ -107,7 +110,17 @@ const extra = {
     correctionSessionId: [...host.sessions.values()].find(s => !s.ended && s.tabId === tabId)?.sessionId ?? null })) }),
   'reader.activateTab': ({ index }) => { window.activated = index; return true; },
   'ui.showConfirm': () => ({ confirmed: true }),
-  'app.getGrantedPermissions': () => ['reader.local_edit'],
+  'app.getGrantedPermissions': () => ['reader.local_edit', 'reader.highlight'],
+  'reader.findTextOccurrences': ({ bookUid, sectionIndex, query }) => {
+    const text = host.books[bookUid].lines[sectionIndex].replace(/<[^>]*>/g, ''), results = [];
+    for (let at = text.indexOf(query); at >= 0; at = text.indexOf(query, at + 1)) results.push({ range: { layer: 'source', exactText: query, start: { utf16: at }, end: { utf16: at + query.length } } });
+    return { results };
+  },
+  'reader.setHighlight': args => ({ highlightId: args.highlightId }),
+  'reader.clearHighlight': () => true,
+  'reader.clearAllHighlights': () => true,
+  'feedback.hasReporterEmail': () => window.hasReporterEmail ?? true,
+  'feedback.report': args => { (window.developerReports ??= []).push(args); return window.reportMode ?? 'cancelled'; },
   'app.getTheme': () => window.theme
 };
 window.palettes = ${JSON.stringify(palettes)};
@@ -134,7 +147,7 @@ await waitFor("[...host.sessions.values()].some(s => s.tabId === tab) && window.
 await waitFor("document.querySelectorAll('#book-list .change').length === 14", 'discovered draft rendered');
 const boot = await evaluate(`({ acked: host.drafts.get('d-id:1').acked, pending: document.querySelectorAll('#book-list .change:not(.conflict)').length,
   conflicts: [...document.querySelectorAll('#book-list .conflict .reason')].map(item => item.textContent),
-  legacy: !document.getElementById('legacy-area').hidden, legacyUnchanged: JSON.stringify([...storage.data].filter(([k]) => !k.startsWith('nc:'))) === legacyBefore,
+  legacy: !document.getElementById('legacy-area').hidden, legacyUnchanged: JSON.stringify([...storage.data].filter(([k]) => legacyKeys.includes(k))) === legacyBefore,
   background: getComputedStyle(document.body).backgroundColor })`);
 assert.equal(boot.acked, 7, 'acknowledged after the plugin copy was saved');
 assert.equal(boot.pending, 12);
@@ -154,11 +167,45 @@ assert.equal(legacySent.send, false, 'no send action for a sent 0.2.2 report');
 // Light theme from the host event.
 await theme('light');
 assert.equal(await evaluate('getComputedStyle(document.body).backgroundColor'), 'rgb(255, 251, 254)');
+assert.equal(await evaluate("document.getElementById('screen-history').hidden && document.getElementById('screen-settings').hidden && document.getElementById('screen-report').hidden"), true, 'home shows only work');
+assert.equal(await evaluate("document.querySelectorAll('[data-icon] svg path').length >= 4 && document.querySelectorAll('[data-icon] image').length === 0"), true, 'navigation uses theme-aware vector icons');
+assert.equal(await evaluate("document.getElementById('pending-count').textContent"), '12 ממתינים · 2 דורשים החלטה');
+const formatting = await evaluate(`(() => { const box = document.querySelector('#book-list .diff');
+  return { bold: getComputedStyle(box.querySelector('.book-b')).fontWeight, italic: getComputedStyle(box.querySelector('.book-i')).fontStyle, images: box.querySelectorAll('img,script,iframe').length, text: box.textContent }; })()`);
+assert.equal(formatting.bold, '700'); assert.equal(formatting.italic, 'italic'); assert.equal(formatting.images, 0);
+assert.match(formatting.text, /פסקה 11/);
+async function capture(name) {
+  const shot = await call('Page.captureScreenshot', { format: 'png' });
+  await writeFile(`test/browser/${name}.png`, Buffer.from(shot.data, 'base64'));
+}
+async function selectPreview() {
+  const rects = await evaluate(`(() => {
+    const box = document.querySelector('#book-list .diff'); box.scrollIntoView({ block: 'center' });
+    const text = document.createTreeWalker(box.querySelector('.book-b'), NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 4);
+    const r = range.getBoundingClientRect(); return { right: r.right - 1, left: r.left + 1, y: r.y + r.height / 2 };
+  })()`);
+  await call('Input.dispatchMouseEvent', { type: 'mousePressed', x: rects.right, y: rects.y, button: 'left', buttons: 1, clickCount: 1 });
+  await call('Input.dispatchMouseEvent', { type: 'mouseMoved', x: rects.left, y: rects.y, button: 'left', buttons: 1 });
+  await call('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rects.left, y: rects.y, button: 'left', buttons: 0, clickCount: 1 });
+  assert.ok((await evaluate('getSelection().toString()')).length > 0, 'formatted preview supports mouse text selection');
+  await evaluate('getSelection().removeAllRanges()');
+}
+await waitFor("!document.getElementById('refresh').disabled", 'initial operation completed before capture');
+await selectPreview();
+await evaluate("document.getElementById('panel').scrollTop = 0");
+await capture('plugin-home-light');
+await theme('dark'); await selectPreview();
+await evaluate("document.getElementById('panel').scrollTop = 0");
+await capture('plugin-home-dark'); await theme('light');
 
 // Continuous scroll with a bounded end.
 const scroll = await evaluate(`(() => { const main = document.getElementById('panel'); const max = main.scrollHeight - main.clientHeight;
   main.scrollTop = 400; const middle = main.scrollTop; main.scrollTop = 1e9; return { max, middle, end: main.scrollTop }; })()`);
 assert.ok(scroll.max > 400, 'content scrolls'); assert.equal(scroll.middle, 400); assert.equal(scroll.end, scroll.max, 'stops at the end');
+await evaluate("document.getElementById('panel').scrollTop = 400");
+await click('#nav-settings'); await click('#nav-work');
+assert.equal(await evaluate("document.getElementById('panel').scrollTop"), 400, 'work scroll position survives screen navigation');
 await evaluate("document.getElementById('panel').scrollTop = 0");
 
 // Keyboard focus survives a re-render (data-focus-key).
@@ -185,13 +232,20 @@ assert.equal(sent.structured, true);
 assert.ok(sent.count >= 12);
 assert.match(sent.history, /השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע/);
 assert.doesNotMatch(sent.history, /התקבל באתר|אושר באתר/);
-assert.equal(await evaluate("JSON.stringify([...storage.data].filter(([k]) => !k.startsWith('nc:'))) === legacyBefore"), true, '0.2.2 keys still untouched');
+assert.equal(await evaluate("JSON.stringify([...storage.data].filter(([k]) => legacyKeys.includes(k))) === legacyBefore"), true, '0.2.2 keys still untouched');
 assert.equal(await evaluate("[...host.submissions.values()].some(s => s.params.reportId === 'legacy-sent-1')"), false, 'sent 0.2.2 report not resubmitted');
 await waitFor("/נשלחו דרך אוצריא/.test(document.getElementById('status').textContent)", 'send summary');
 
 // The delivery wording in both modes, switching back and forth.
 const wording = /השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע/, legacyWording = /נשלח בגרסה הקודמת — סטטוס הטיפול באתר אינו ידוע/;
 const modes = {};
+await click('#nav-history');
+assert.equal(await evaluate("!document.getElementById('screen-history').hidden && document.querySelector('#history-list .card').getBoundingClientRect().height > 0"), true, 'history screen opens with mouse');
+await evaluate("document.getElementById('nav-history').focus()");
+await key('ArrowLeft');
+assert.equal(await evaluate("document.getElementById('screen-history').hidden && !document.getElementById('screen-settings').hidden && document.activeElement.id === 'nav-settings'"), true, 'RTL arrow switches to settings with focus');
+await key('ArrowRight');
+assert.equal(await evaluate("!document.getElementById('screen-history').hidden && document.activeElement.id === 'nav-history'"), true, 'RTL arrow returns to history');
 for (const mode of ['dark', 'light', 'dark', 'light']) {
   await theme(mode);
   const view = await evaluate("({ history: document.getElementById('history-list').textContent, legacy: document.getElementById('legacy-list').textContent })");
@@ -199,7 +253,47 @@ for (const mode of ['dark', 'light', 'dark', 'light']) {
   const hint = Math.min(...await contrasts('#history-list .hint, #legacy-list .hint')), header = Math.min(...await contrasts('.panel-header h1'));
   modes[mode] = { hint, header };
   assert.ok(hint >= 4.5 && header >= 4.5, `${mode} contrast ${JSON.stringify(modes[mode])}`);
+  await click('#nav-settings');
+  await click('#marks-toggle');
+  await waitFor("!document.getElementById('marks-toggle').disabled", 'setting saved');
+  await click('#marks-toggle');
+  await waitFor("!document.getElementById('marks-toggle').disabled", 'setting restored');
+  await capture(`plugin-settings-${mode}`);
+  await click('#nav-history');
 }
+
+// The developer report uses the host's plugin-report API, never book feedback.
+await click('#nav-report');
+await waitFor("document.getElementById('report-email-area').hidden", 'saved email used without exposing it');
+assert.equal(await evaluate("!document.getElementById('screen-report').hidden && document.getElementById('screen-history').hidden"), true);
+await call('Input.insertText', { text: 'תקלה בתוסף: בדיקת הממשק בלבד' });
+await waitFor("!document.getElementById('report-send').disabled", 'report text entered');
+await capture('plugin-report-light');
+await click('#report-send');
+await waitFor("/בוטלה/.test(document.getElementById('status').textContent)", 'host cancellation');
+await waitFor("!document.getElementById('report-send').disabled", 'report action released after cancellation');
+assert.equal(await evaluate("document.getElementById('report-details').value"), 'תקלה בתוסף: בדיקת הממשק בלבד', 'cancel preserves the draft');
+await evaluate("window.reportMode = 'queued'");
+await click('#report-send');
+await waitFor("/הדיווח למפתח נשמר בתור/.test(document.getElementById('status').textContent)", 'developer report queued');
+await waitFor("!document.getElementById('report-details').disabled", 'queued report operation completed');
+assert.equal(await evaluate("document.getElementById('report-details').value"), '', 'queued draft accepted by host');
+assert.equal(await evaluate("developerReports.length === 2 && developerReports.every(r => r.details.includes('תקלה בתוסף') && r.reportType === 'bug' && !('reporterEmail' in r))"), true);
+assert.equal(await evaluate('host.submissions.size'), sent.count, 'reporting the plugin never submits book corrections');
+await click('#report-back');
+assert.equal(await evaluate("!document.getElementById('screen-history').hidden"), true, 'returns to the originating screen');
+await evaluate("window.hasReporterEmail = false; window.reportMode = 'sent'");
+await theme('dark'); await click('#nav-report');
+await waitFor("!document.getElementById('report-email-area').hidden", 'optional email when none saved');
+await call('Input.insertText', { text: 'בדיקת דיווח במצב כהה' });
+await evaluate("document.getElementById('report-email').focus()");
+await call('Input.insertText', { text: 'qa@example.invalid' });
+await capture('plugin-report-dark');
+await click('#report-send');
+await waitFor("/הדיווח למפתח נשלח דרך/.test(document.getElementById('status').textContent) && !document.getElementById('report-details').disabled", 'developer report sent');
+assert.equal(await evaluate("developerReports.at(-1).reporterEmail"), 'qa@example.invalid');
+assert.equal(await evaluate('host.submissions.size'), sent.count);
+await click('#report-back'); await theme('light');
 
 // A history record saved by an earlier run: shown with the new wording after
 // boot and after a reload that keeps storage; the record is not rewritten and
@@ -230,6 +324,10 @@ async function openWith(entries, reload) {
 }
 const kept = await openWith([...seed.data], false);
 await openWith(kept, true);
+await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+await evaluate("document.getElementById('panel').scrollTop = 0");
+assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'no horizontal overflow on a narrow page');
+await capture('plugin-home-mobile');
 assert.equal(errors.length, 0, JSON.stringify(errors));
 console.log(JSON.stringify({ boot, scroll, focus: { focused, next }, sent: { count: sent.count, structured: sent.structured }, contrast: modes, savedHistory: 'shown after boot and reload, no submit', exceptions: errors.length }, null, 2));
 ws.close();

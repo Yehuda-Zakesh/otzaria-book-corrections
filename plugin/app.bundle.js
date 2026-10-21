@@ -714,7 +714,7 @@ function computeBook(book) {
     const record = list.find(entry => entry.status === 'sent') ?? list.find(entry => entry.status === 'queued');
     if (!record) continue;
     book.history.push({ key: itemKey, record, sectionIndex: record.sectionIndex ?? null, originalText: record.originalText ?? null,
-      proposedText: record.proposedText ?? null, title: record.title ?? null });
+      originalSourceText: record.originalSourceText ?? null, proposedText: record.proposedText ?? null, title: record.title ?? null });
     if (!handledKeys.has(itemKey) && Number.isInteger(record.sectionIndex)) {
       book.handled.push({ key: itemKey, sectionIndex: record.sectionIndex, originalText: record.originalText ?? '',
         proposedText: record.proposedText ?? '', resolution: record, fromHistory: true });
@@ -861,6 +861,7 @@ function createSessionController({ call, store, onChange = () => {}, onNotice = 
         track(ended, { ended: true, reason: 'explicit' });
         await store.recordFinal(ended, 'explicit');
         const result = await keep(ended);
+        sessions.get(sessionId).saved = result.saved;
         onChange();
         return { snapshot: ended, ...result };
       });
@@ -1007,7 +1008,7 @@ function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
-  if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי — מגיע לדוא״ל בלבד ואינו בתור התיקונים באתר';
+  if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי לבדיקה ידנית — סטטוס הטיפול אינו ידוע';
   if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';
 }
@@ -1046,7 +1047,7 @@ async function submitItem({ call, store, book, item, freeText = false }) {
   await store.recordSubmission(book.bookUid, item.key, record.reportId, result.status, { result: record });
   // The resolution keeps what was sent: history survives compaction.
   await store.resolve(book.bookUid, item.key, result.status, { result: record, sectionIndex: item.sectionIndex,
-    originalText: item.originalText, proposedText: item.proposedText, title: book.bookId ?? null });
+    originalText: item.originalText, originalSourceText: item.originalSourceText, proposedText: item.proposedText, title: book.bookId ?? null });
   return { status: result.status, record };
 }
 
@@ -1214,6 +1215,104 @@ function mergeProposals(original, proposals) {
   return result + original.slice(cursor);
 }
 
+
+// Book HTML is never inserted into the page. Only formatting tags and vetted
+// style values are recreated; text and diffs always use textContent.
+const bookTags = new Set(['b', 'strong', 'i', 'em', 'u', 's', 'strike', 'small', 'big', 'sup', 'sub', 'span', 'font', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'center', 'blockquote', 'a']);
+const bookStyleRules = {
+  'font-weight': /^(normal|bold|[1-9]00)$/i,
+  'font-style': /^(normal|italic|oblique)$/i,
+  'text-decoration': /^(none|underline|line-through|overline)( (underline|line-through|overline))*$/i,
+  'font-size': /^(small|smaller|large|larger|medium|(?:[1-9]|[1-5]\d|60)(?:\.\d+)?px|[0-2](?:\.\d+)?em|(?:[5-9]\d|1\d\d|200)%)$/i,
+  'color': /^(#[\da-f]{3,8}|[a-z]{3,20}|rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\))$/i,
+  'background-color': /^(#[\da-f]{3,8}|[a-z]{3,20})$/i
+};
+function bookAttributes(tag) {
+  const attrs = {};
+  for (const match of tag.matchAll(/\b(style|color|size)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi)) attrs[match[1].toLowerCase()] = match[2] ?? match[3] ?? match[4];
+  const styles = [];
+  for (const rule of (attrs.style ?? '').split(';')) {
+    const colon = rule.indexOf(':');
+    if (colon < 0) continue;
+    const name = rule.slice(0, colon).trim().toLowerCase(), value = rule.slice(colon + 1).trim();
+    if (bookStyleRules[name]?.test(value)) styles.push(`${name}:${value}`);
+  }
+  if (attrs.color && bookStyleRules.color.test(attrs.color)) styles.push(`color:${attrs.color}`);
+  if (attrs.size && /^[+-]?[1-7]$/.test(attrs.size)) {
+    const size = Math.max(1, Math.min(7, /^[+-]/.test(attrs.size) ? 3 + Number(attrs.size) : Number(attrs.size)));
+    styles.push(`font-size:${[0, .6, .75, 1, 1.2, 1.5, 2, 3][size]}em`);
+  }
+  return styles.join(';');
+}
+
+function bookFormatRuns(raw, plain) {
+  if (typeof raw !== 'string' || !raw.includes('<') || sourceText(raw) !== plain) return null;
+  const runs = [], stack = [];
+  let offset = 0, copied = 0;
+  const add = (text, structural = false) => {
+    if (text) runs.push({ start: offset, end: offset + text.length, formats: stack.slice(0, 32).map(item => ({ ...item })), structural });
+    offset += text.length;
+  };
+  for (const match of raw.matchAll(/<[^>]*>/g)) {
+    add(sourceText(raw.slice(copied, match.index))); copied = match.index + match[0].length;
+    const tag = /^<\s*(\/?)\s*([a-z][\w-]*)/i.exec(match[0]);
+    const space = sourceText(match[0]);
+    if (space) add(space, true);
+    if (!tag) continue;
+    const name = tag[2].toLowerCase();
+    if (!bookTags.has(name)) continue;
+    if (tag[1]) {
+      const at = stack.map(item => item.name).lastIndexOf(name);
+      if (at >= 0) stack.splice(at);
+    } else if (!/\/\s*>$/.test(match[0])) stack.push({ name, css: bookAttributes(match[0]) });
+  }
+  add(sourceText(raw.slice(copied)));
+  return offset === plain.length ? runs : null;
+}
+
+function formattedDiffParts(before, after, raw) {
+  const runs = bookFormatRuns(raw, before), parts = [];
+  const textRuns = runs?.filter(run => !run.structural) ?? [];
+  let offset = 0, runIndex = 0;
+  for (const segment of computeTextDiff(before, after)) {
+    if (segment.op === 'added') {
+      const run = runs?.find(item => !item.structural && item.start <= offset && item.end >= offset);
+      parts.push({ ...segment, formats: run?.formats ?? [] });
+      continue;
+    }
+    const end = offset + segment.text.length;
+    if (!runs) { parts.push({ ...segment, formats: [] }); offset = end; continue; }
+    while (offset < end) {
+      while (runs[runIndex]?.end <= offset) runIndex++;
+      const run = runs[runIndex], until = Math.min(end, run?.end ?? end);
+      parts.push({ op: segment.op, text: before.slice(offset, until), formats: run?.formats ?? [],
+        // Spaces introduced by block tags are not literal book indentation.
+        hidden: !!run?.structural && (run.end <= (textRuns[0]?.start ?? 0) || run.start >= (textRuns.at(-1)?.end ?? before.length)),
+        lineBreak: !!run?.structural && run.start > 0 && run.end < before.length });
+      offset = until;
+    }
+  }
+  return parts;
+}
+
+function appendFormattedDiff(box, before, after, raw, doc = document) {
+  for (const part of formattedDiffParts(before, after, raw)) {
+    if (part.hidden && part.op === 'equal') continue;
+    let parent = box;
+    for (const format of part.formats) {
+      const inline = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'center', 'blockquote', 'a', 'font'].includes(format.name);
+      const wrapper = doc.createElement(inline ? 'span' : format.name);
+      wrapper.className = `book-format book-${format.name}`;
+      if (format.css) wrapper.setAttribute('style', format.css);
+      parent.append(wrapper); parent = wrapper;
+    }
+    const text = doc.createElement(part.op === 'removed' ? 'del' : part.op === 'added' ? 'ins' : 'span');
+    text.textContent = part.text;
+    if (part.lineBreak && part.op === 'equal') { parent.append(doc.createElement('br')); }
+    else parent.append(text);
+  }
+}
+
 // Pending proposals are marked in Otzaria's reader as plugin highlights on the
 // original words they replace. The host keeps highlights only while an
 // instance of the plugin lives, so each instance draws them again after boot;
@@ -1336,6 +1435,9 @@ let busy = false, renderQueued = false, statusTimer, startInitialization, initia
 // A reader click wakes a background instance (app.run_on_startup) without
 // leaving the book; it has no visible page, so its messages go to Otzaria.
 let background = false;
+const mainScreens = ['work', 'history', 'settings'];
+let currentScreen = 'work', lastMainScreen = 'work', reporterHasEmail = null;
+const screenScroll = new Map();
 // Pending proposals are marked green in the reader (a setting, on by default).
 const marks = createReaderMarks(call);
 let marksOn = true, highlightGranted = true, refCheck = 0;
@@ -1393,7 +1495,49 @@ function button(label, action, { ghost = true, key, disabled = false, describe }
   return item;
 }
 async function confirm(title, content) {
-  return (await call('ui.showConfirm', { title, content }))?.confirmed === true;
+  try { return (await call('ui.showConfirm', { title, content }))?.confirmed === true; }
+  catch (error) {
+    if (codeOf(error) === 'timeout') throw new Error('לא התקבל אישור בזמן. לחצו שוב על הפעולה ואשרו בחלון של אוצריא.');
+    throw error;
+  }
+}
+function showScreen(name, focus = false) {
+  if (![...mainScreens, 'report'].includes(name)) return;
+  screenScroll.set(currentScreen, el('panel').scrollTop ?? 0);
+  if (name !== currentScreen) message();
+  currentScreen = name;
+  if (mainScreens.includes(name)) lastMainScreen = name;
+  for (const screen of [...mainScreens, 'report']) el(`screen-${screen}`).hidden = screen !== name;
+  for (const screen of mainScreens) {
+    const tab = el(`nav-${screen}`);
+    tab.setAttribute('aria-selected', String(screen === name));
+    tab.tabIndex = screen === name || (name === 'report' && screen === lastMainScreen) ? 0 : -1;
+  }
+  el('panel').scrollTop = screenScroll.get(name) ?? 0;
+  if (focus && mainScreens.includes(name)) el(`nav-${name}`).focus();
+  if (name === 'report') afterBoot(async () => {
+    const result = await call('feedback.hasReporterEmail');
+    reporterHasEmail = typeof result === 'boolean' ? result : result?.hasEmail === true;
+    el('report-email-area').hidden = reporterHasEmail;
+    el('report-email-note').textContent = reporterHasEmail ? 'אוצריא תצרף את כתובת המייל השמורה בהגדרות הדיווח שלה.' : 'אפשר להוסיף כתובת לחזרה, או לשלוח בלי כתובת מייל.';
+  }).catch(() => { reporterHasEmail = null; el('report-email-area').hidden = false; });
+}
+function renderReport() {
+  for (const id of ['report-details', 'report-type', 'report-email']) el(id).disabled = busy;
+  el('report-send').disabled = busy || !String(el('report-details').value ?? '').trim();
+}
+async function reportToDeveloper() {
+  const details = String(el('report-details').value ?? '').trim();
+  if (!details) { el('report-details').focus(); throw new Error('כתבו את תוכן הדיווח לפני השליחה.'); }
+  if (details.length > 5000) throw new Error('הדיווח יכול להכיל עד 5,000 תווים.');
+  const email = reporterHasEmail === true ? '' : String(el('report-email').value ?? '').trim();
+  if (email && el('report-email').checkValidity && !el('report-email').checkValidity()) throw new Error('כתובת המייל אינה תקינה.');
+  const result = await call('feedback.report', { details, reportType: el('report-type').value || 'bug', ...(email ? { reporterEmail: email } : {}) });
+  if (result === 'sent' || result === 'queued') {
+    el('report-details').value = '';
+    message(result === 'sent' ? 'הדיווח למפתח נשלח דרך מערכת הדיווחים של אוצריא.' : 'הדיווח למפתח נשמר בתור של אוצריא ויישלח כשיתאפשר.', false);
+  } else if (result === 'cancelled') message('שליחת הדיווח בוטלה. הנוסח נשמר כאן לעריכה.');
+  else throw new Error('לא התקבל אישור לשליחת הדיווח. הנוסח נשמר; בדקו באוצריא לפני ניסיון נוסף.');
 }
 // One user operation at a time in this page; session operations are also
 // serialized inside the controller.
@@ -1496,8 +1640,22 @@ async function tabForToolbar(event) {
 const initializationStarted = new Promise(resolve => { startInitialization = resolve; });
 const afterBoot = task => initializationStarted.then(() => initialized).then(task);
 function requestEdit(event, fromToolbar) {
-  if (!['correct-book', 'correct-selection'].includes(event?.itemId)) return;
+  if (!['correct-book', 'correct-selection', 'send-book-corrections'].includes(event?.itemId)) return;
   afterBoot(() => run(async () => {
+    if (event.itemId === 'send-book-corrections') {
+      await refreshTabs();
+      const candidates = openTabs.filter(tab => sameBook(tab, event));
+      const bookUid = event.bookUid ?? event.selection?.bookUid ?? (event.currentId != null ? `id:${event.currentId}` : null) ?? (candidates.length === 1 ? candidates[0].bookUid : null);
+      if (!bookUid) throw new Error('לא זוהה הספר לשליחה. לחצו לחיצה ימנית בתוך הספר ונסו שוב.');
+      const live = liveFor(bookUid);
+      if (live && !(await controller.save(live.snapshot.sessionId)).saved) throw new Error('שמירת התיקונים עדיין לא הושלמה. נסו שוב לאחר שמירת הטיוטה.');
+      await reload();
+      const pending = state.books.get(bookUid)?.pending ?? [];
+      if (!pending.length) { notify('אין תיקונים ממתינים לשליחה בספר הזה.'); return; }
+      if (!await confirm('שליחת תיקוני הספר', `לשלוח ${pending.length} הצעות תיקון מהספר? הדיווחים יישלחו עם כתובת המייל המוגדרת בדיווח השגיאות של אוצריא. הספר המקומי אינו משתנה.`)) return;
+      await sendItems(bookUid, pending.map(item => item.sectionIndex));
+      return;
+    }
     const tabId = event.selection?.tabId ?? event.tabId ?? (fromToolbar || !event.selection ? await tabForToolbar(event) : null);
     if (!tabId) throw new Error('לא זוהתה לשונית הספר. לחצו לחיצה ימנית בתוך הספר ובחרו „תיקון הספר בקורא”.');
     await beginFor(tabId);
@@ -1524,7 +1682,7 @@ async function sendItems(bookUid, keys) {
   const live = liveFor(bookUid);
   if (live) {
     const saved = await controller.save(live.snapshot.sessionId);
-    if (!saved.saved) message('השינויים האחרונים בקורא עדיין נשמרים באוצריא; נשלחים התיקונים שכבר נשמרו בתוסף.');
+    if (!saved.saved) throw new Error('שמירת התיקונים עדיין לא הושלמה. נסו שוב לאחר שמירת הטיוטה.');
   }
   let sent = 0, queued = 0, kept = 0, book = null, queue = [];
   // One storage read per batch; re-read only after an ID conflict changed an item.
@@ -1547,7 +1705,7 @@ async function sendItems(bookUid, keys) {
     }
     let result = await attempt(false);
     if (result.status === 'needs_decision') {
-      const free = await confirm('לא ניתן לשלוח כתיקון מובנה', `את התיקון בפסקה ${item.sectionIndex + 1} אי אפשר למפות במדויק למקור הספר. אפשר לשלוח אותו כדיווח חופשי, אך דיווח חופשי מגיע לדוא״ל בלבד ואינו נכנס לתור התיקונים באתר. לשלוח כדיווח חופשי?`);
+      const free = await confirm('התיקון דורש בדיקה ידנית', `אוצריא לא הצליחה להכין תיקון מובנה לפסקה ${item.sectionIndex + 1}. זה עשוי לקרות בשינוי שחוצה תגיות עיצוב או בפסקה ארוכה מדי. אפשר לשלוח את המקור וההצעה כדיווח חופשי לבדיקה ידנית; אופן הטיפול תלוי במקור הספר ובשרת. לשלוח לבדיקה ידנית? ביטול ישאיר את ההצעה שמורה.`);
       result = free ? await attempt(true) : { status: 'kept' };
     }
     if (result.status === 'id_conflict') {
@@ -1557,14 +1715,14 @@ async function sendItems(bookUid, keys) {
       result = { status: 'kept' };
     }
     if (result.status === 'email_required') throw new Error('לפני השליחה יש לשמור כתובת מייל בהגדרות דיווח השגיאות של אוצריא.');
-    if (result.status === 'source_changed') message(`המקור של פסקה ${item.sectionIndex + 1} השתנה; התיקון לא נשלח ונשמר.`, true);
+    if (result.status === 'source_changed') notify(`המקור של פסקה ${item.sectionIndex + 1} השתנה; התיקון לא נשלח ונשמר.`, true);
     if (result.status === 'sent') sent++; else if (result.status === 'queued') queued++; else kept++;
     if (!['sent', 'queued'].includes(result.status)) keys = keys.filter(index => index !== item.sectionIndex);
   }
   const parts = [];
   if (sent) parts.push(`${sent} נשלחו דרך אוצריא`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
   if (kept) parts.push(`${kept} נשארו לטיפול`);
-  if (parts.length) message(parts.join('; ') + '.', kept > 0 && !sent && !queued, 8000);
+  if (parts.length) notify(parts.join('; ') + '.', kept > 0 && !sent && !queued);
   // Remove fully handled versions only when no live session can still add to them.
   if (!liveFor(bookUid)) await store.compact(await store.load(), bookUid).catch(() => 0);
 }
@@ -1630,7 +1788,7 @@ const legacyCovered = (change, saved) => saved.sectionIndex === change.sectionIn
 async function sendLegacyReport(draft, report) {
   await ensureEmail();
   const bookUid = draft.bookUid ?? `legacy:${draft.bookId}`;
-  if (report.submission.forceFreeText && !await confirm('שליחה כדיווח חופשי', 'הדיווח הזה הוכן בגרסה הקודמת כדיווח חופשי. דיווח חופשי מגיע לדוא״ל בלבד ואינו נכנס לתור התיקונים באתר. לשלוח?')) return;
+  if (report.submission.forceFreeText && !await confirm('שליחה לבדיקה ידנית', 'הדיווח הזה הוכן בגרסה הקודמת כדיווח חופשי עם המקור וההצעה. אופן הטיפול בו תלוי במקור הספר ובשרת. לשלוח לבדיקה ידנית?')) return;
   const { allowQueue, forceFreeText, ...submission } = report.submission;
   const params = { ...submission, allowQueue: true, ...(forceFreeText ? { forceFreeText: true } : { requireTextCorrection: true }) };
   await store.recordSubmission(bookUid, report.key, report.reportId, 'attempt');
@@ -1651,6 +1809,7 @@ async function sendLegacyReport(draft, report) {
 function renderLive() {
   const cards = [];
   for (const item of controller.sessions.values()) {
+    if (item.ended && item.saved) continue;
     const snapshot = item.snapshot, card = node('article', 'card');
     card.append(node('h3', '', snapshot.bookId));
     const draft = snapshot.draft ?? {};
@@ -1679,15 +1838,15 @@ function renderLive() {
     return row;
   });
   el('tab-list').replaceChildren(...rows);
+  el('tab-list').hidden = !rows.length && cards.length > 0;
+  if (!rows.length && !cards.length) el('tab-list').append(node('p', '', 'פתחו ספר טקסט באוצריא כדי להתחיל לתקן.'),
+    node('p', 'hint', 'אפשר להתחיל גם מתוך הספר: לחיצה ימנית ← תיקון הספר בקורא. לשליחה בלי לפתוח את התוסף: שליחת תיקוני הספר בסרגל הקורא.'));
 }
 // Like Otzaria's TextCorrectionDiffView: one bordered box, removed words
 // struck through on errorContainer, added words bold on primaryContainer.
-function diffView(before, after) {
+function diffView(before, after, raw) {
   const box = node('div', 'diff');
-  for (const segment of computeTextDiff(before ?? '', after ?? '')) {
-    box.append(segment.op === 'equal' ? document.createTextNode?.(segment.text) ?? node('span', '', segment.text)
-      : node(segment.op === 'removed' ? 'del' : 'ins', '', segment.text));
-  }
+  appendFormattedDiff(box, before ?? '', after ?? '', raw);
   // A long paragraph scrolls inside the box; start at the first change.
   queueMicrotask(() => {
     const first = box.querySelector?.('del, ins');
@@ -1697,20 +1856,23 @@ function diffView(before, after) {
 }
 function changeView(item) {
   const view = node('div', 'change');
-  view.append(node('strong', '', `פסקה ${item.sectionIndex + 1}`), diffView(item.originalText, item.proposedText));
+  view.append(node('strong', '', `פסקה ${item.sectionIndex + 1}`), diffView(item.originalText, item.proposedText, item.originalSourceText));
   if (item.proposedText === '') view.append(node('p', 'hint', '(מחיקת הפסקה)'));
   return view;
 }
 function renderBooks() {
   const cards = [];
+  let pendingCount = 0, conflictCount = 0;
   for (const book of state.books.values()) {
+    pendingCount += book.pending.length;
+    conflictCount += book.conflicts.length;
     if (!book.pending.length && !book.conflicts.length) continue;
     const card = node('article', 'card'), live = liveFor(book.bookUid);
     card.append(node('h3', '', book.bookId ?? book.bookUid));
     if (book.pending.length) {
       const header = node('div', 'row');
       header.append(node('span', 'grow', `${book.pending.length} תיקונים ממתינים לשליחה`),
-        button('שלח הכל', () => sendItems(book.bookUid, book.pending.map(item => item.sectionIndex)), { ghost: false, key: `send:${book.bookUid}` }));
+        button('שלח הכל', () => sendItems(book.bookUid, book.pending.map(item => item.sectionIndex)), { ghost: false, key: `send:${book.bookUid}`, describe: `שליחת ${book.pending.length} התיקונים של ${book.bookId ?? book.bookUid}` }));
       if (live) {
         // One proposal per paragraph can be shown in the reader at a time.
         const hidden = book.pending.filter((item, index, all) => !live.snapshot.changes.some(change => change.sectionIndex === item.sectionIndex) &&
@@ -1753,6 +1915,7 @@ function renderBooks() {
     cards.push(card);
   }
   if (!cards.length) cards.push(node('p', 'hint', 'אין תיקונים שממתינים לשליחה.'));
+  el('pending-count').textContent = [pendingCount ? `${pendingCount} ממתינים` : '', conflictCount ? `${conflictCount} דורשים החלטה` : ''].filter(Boolean).join(' · ');
   el('book-list').replaceChildren(...cards);
 }
 function renderLegacy() {
@@ -1805,7 +1968,7 @@ function renderHistory() {
   for (const book of state.books.values()) for (const item of book.history) {
     const record = item.record;
     const row = node('article', 'card');
-    row.append(node('h3', '', `${item.title ?? book.bookId ?? book.bookUid}${Number.isInteger(item.sectionIndex) ? ` — פסקה ${item.sectionIndex + 1}` : ''}`), typeof item.originalText === 'string' ? diffView(item.originalText, item.proposedText) : node('p', 'after', item.proposedText || '(מחיקה)'),
+    row.append(node('h3', '', `${item.title ?? book.bookId ?? book.bookUid}${Number.isInteger(item.sectionIndex) ? ` — פסקה ${item.sectionIndex + 1}` : ''}`), typeof item.originalText === 'string' ? diffView(item.originalText, item.proposedText, item.originalSourceText) : node('p', 'after', item.proposedText || '(מחיקה)'),
       node('p', 'hint', `${deliveryLabel(record.result) ?? record.status} · ${new Date(record.at).toLocaleDateString('he-IL')} · ${record.result?.reportId ?? ''}`));
     rows.push(row);
   }
@@ -1815,6 +1978,7 @@ function renderHistory() {
       node('p', 'hint', `נשלח בגרסה הקודמת · ${new Date(item.sentAt).toLocaleDateString('he-IL')} · ${item.id}`));
     rows.push(row);
   }
+  el('history-count').textContent = rows.length ? String(rows.length) : '';
   if (!rows.length) rows.push(node('p', 'hint', 'אין עדיין תיקונים שנשלחו.'));
   el('history-list').replaceChildren(...rows);
 }
@@ -1825,9 +1989,9 @@ function renderSettings() {
 }
 function render() {
   const focused = document.activeElement?.dataset?.focusKey;
-  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings();
+  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport();
   el('refresh').disabled = busy;
-  if (focused) document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
 async function initialize(boot) {
   background = boot?.app?.runMode === 'background';
@@ -1853,6 +2017,21 @@ async function initialize(boot) {
 }
 // Read the choice now: run() renders first, which resets the box to the stored value.
 el('marks-toggle').addEventListener('change', event => { const enabled = event.target.checked; run(() => setMarks(enabled)); });
+for (const [index, screen] of mainScreens.entries()) {
+  el(`nav-${screen}`).addEventListener('click', () => showScreen(screen));
+  el(`nav-${screen}`).addEventListener('keydown', event => {
+    let next;
+    if (event.key === 'ArrowLeft') next = (index + 1) % mainScreens.length;
+    if (event.key === 'ArrowRight') next = (index + mainScreens.length - 1) % mainScreens.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = mainScreens.length - 1;
+    if (next !== undefined) { event.preventDefault(); showScreen(mainScreens[next], true); }
+  });
+}
+el('nav-report').addEventListener('click', () => { showScreen('report'); el('report-details').focus(); });
+el('report-back').addEventListener('click', () => showScreen(lastMainScreen, true));
+el('report-details').addEventListener('input', () => { if (currentScreen === 'report') message(); renderReport(); });
+el('report-send').addEventListener('click', () => { afterBoot(() => run(reportToDeveloper)).catch(error => notify(errorText(error), true)); });
 el('refresh').addEventListener('click', () => run(async () => { await refreshTabs(); await controller.recoverOrphans(); }));
 el('embedded-native').addEventListener('click', () => run(async () => {
   await call('reader.setDefaultTextReader', { enabled: false }).catch(() => {});

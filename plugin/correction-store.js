@@ -295,7 +295,7 @@ function computeBook(book) {
     const record = list.find(entry => entry.status === 'sent') ?? list.find(entry => entry.status === 'queued');
     if (!record) continue;
     book.history.push({ key: itemKey, record, sectionIndex: record.sectionIndex ?? null, originalText: record.originalText ?? null,
-      proposedText: record.proposedText ?? null, title: record.title ?? null });
+      originalSourceText: record.originalSourceText ?? null, proposedText: record.proposedText ?? null, title: record.title ?? null });
     if (!handledKeys.has(itemKey) && Number.isInteger(record.sectionIndex)) {
       book.handled.push({ key: itemKey, sectionIndex: record.sectionIndex, originalText: record.originalText ?? '',
         proposedText: record.proposedText ?? '', resolution: record, fromHistory: true });

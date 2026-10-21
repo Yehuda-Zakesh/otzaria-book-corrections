@@ -7,9 +7,8 @@ const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 assert.equal(pkg.version, manifest.version, 'package and manifest versions must match');
 const committed = await readFile('plugin/app.bundle.js', 'utf8');
 assert.equal(await build(), committed, 'Run npm run build and commit the generated bundle');
-// Compatibility policy of the 0.3 line (Otzaria 0.9.99, PR #2311 contract).
-// The 0.2.x line for the released 0.9.98 stays on main and is not changed here.
-assert.equal(manifest.minAppVersion, '0.9.99', 'the correction session and draft API requires Otzaria 0.9.99');
+// The user's 0.9.98 host includes the correction session and draft APIs.
+assert.equal(manifest.minAppVersion, '0.9.98', 'the requested minimum host version is 0.9.98');
 for (const method of ['reader.beginCorrectionSession', 'reader.getCorrectionSession', 'reader.endCorrectionSession',
   'reader.acknowledgeCorrectionDraft', 'reader.listCorrectionDrafts', 'reader.getCorrectionDraft', 'feedback.submitBookCorrection']) {
   assert.ok(committed.includes(`'${method}'`), `the native correction flow uses ${method}`);
@@ -27,7 +26,7 @@ for (const item of [...manifest.contributes.startup.toolbarItems, ...manifest.co
   assert.notEqual(item.openPlugin, true, `${item.id} must not open the plugin page`);
 }
 assert.ok(manifest.contributes.startup.contextMenuItems.some(item => item.contexts.includes('reader-book')),
-  'the reader menu without a selection carries the exact tabId (0.9.99)');
+  'the reader menu without a selection carries the exact tabId');
 // Pending proposals are marked in the reader; the host keeps highlights only
 // while an instance lives, so a background engine redraws them, and it wakes
 // only while the setting is on and something is pending.

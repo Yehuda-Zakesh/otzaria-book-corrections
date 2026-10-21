@@ -62,7 +62,7 @@ export function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
-  if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי — מגיע לדוא״ל בלבד ואינו בתור התיקונים באתר';
+  if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי לבדיקה ידנית — סטטוס הטיפול אינו ידוע';
   if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';
 }
@@ -101,6 +101,6 @@ export async function submitItem({ call, store, book, item, freeText = false }) 
   await store.recordSubmission(book.bookUid, item.key, record.reportId, result.status, { result: record });
   // The resolution keeps what was sent: history survives compaction.
   await store.resolve(book.bookUid, item.key, result.status, { result: record, sectionIndex: item.sectionIndex,
-    originalText: item.originalText, proposedText: item.proposedText, title: book.bookId ?? null });
+    originalText: item.originalText, originalSourceText: item.originalSourceText, proposedText: item.proposedText, title: book.bookId ?? null });
   return { status: result.status, record };
 }

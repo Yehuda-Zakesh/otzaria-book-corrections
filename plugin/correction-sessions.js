@@ -123,6 +123,7 @@ export function createSessionController({ call, store, onChange = () => {}, onNo
         track(ended, { ended: true, reason: 'explicit' });
         await store.recordFinal(ended, 'explicit');
         const result = await keep(ended);
+        sessions.get(sessionId).saved = result.saved;
         onChange();
         return { snapshot: ended, ...result };
       });

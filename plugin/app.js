@@ -4,8 +4,9 @@ import { createSessionController, codeOf } from './correction-sessions.js';
 import { submitItem, deliveryLabel, legacyDeliveryLabel } from './correction-submit.js';
 import { readLegacyDrafts, readLegacyHistory } from './legacy-drafts.js';
 import { loadBook, sourceText } from './book.js';
-import { computeTextDiff, mergeProposals } from './text-diff.js';
+import { mergeProposals } from './text-diff.js';
 import { createReaderMarks, marksEnabled, MARK_SETTING_KEY } from './reader-marks.js';
+import { appendFormattedDiff } from './book-format.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 const call = host ? createRpcCall(host) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
 const store = createCorrectionStore(call);
@@ -14,6 +15,9 @@ let busy = false, renderQueued = false, statusTimer, startInitialization, initia
 // A reader click wakes a background instance (app.run_on_startup) without
 // leaving the book; it has no visible page, so its messages go to Otzaria.
 let background = false;
+const mainScreens = ['work', 'history', 'settings'];
+let currentScreen = 'work', lastMainScreen = 'work', reporterHasEmail = null;
+const screenScroll = new Map();
 // Pending proposals are marked green in the reader (a setting, on by default).
 const marks = createReaderMarks(call);
 let marksOn = true, highlightGranted = true, refCheck = 0;
@@ -71,7 +75,49 @@ function button(label, action, { ghost = true, key, disabled = false, describe }
   return item;
 }
 async function confirm(title, content) {
-  return (await call('ui.showConfirm', { title, content }))?.confirmed === true;
+  try { return (await call('ui.showConfirm', { title, content }))?.confirmed === true; }
+  catch (error) {
+    if (codeOf(error) === 'timeout') throw new Error('לא התקבל אישור בזמן. לחצו שוב על הפעולה ואשרו בחלון של אוצריא.');
+    throw error;
+  }
+}
+function showScreen(name, focus = false) {
+  if (![...mainScreens, 'report'].includes(name)) return;
+  screenScroll.set(currentScreen, el('panel').scrollTop ?? 0);
+  if (name !== currentScreen) message();
+  currentScreen = name;
+  if (mainScreens.includes(name)) lastMainScreen = name;
+  for (const screen of [...mainScreens, 'report']) el(`screen-${screen}`).hidden = screen !== name;
+  for (const screen of mainScreens) {
+    const tab = el(`nav-${screen}`);
+    tab.setAttribute('aria-selected', String(screen === name));
+    tab.tabIndex = screen === name || (name === 'report' && screen === lastMainScreen) ? 0 : -1;
+  }
+  el('panel').scrollTop = screenScroll.get(name) ?? 0;
+  if (focus && mainScreens.includes(name)) el(`nav-${name}`).focus();
+  if (name === 'report') afterBoot(async () => {
+    const result = await call('feedback.hasReporterEmail');
+    reporterHasEmail = typeof result === 'boolean' ? result : result?.hasEmail === true;
+    el('report-email-area').hidden = reporterHasEmail;
+    el('report-email-note').textContent = reporterHasEmail ? 'אוצריא תצרף את כתובת המייל השמורה בהגדרות הדיווח שלה.' : 'אפשר להוסיף כתובת לחזרה, או לשלוח בלי כתובת מייל.';
+  }).catch(() => { reporterHasEmail = null; el('report-email-area').hidden = false; });
+}
+function renderReport() {
+  for (const id of ['report-details', 'report-type', 'report-email']) el(id).disabled = busy;
+  el('report-send').disabled = busy || !String(el('report-details').value ?? '').trim();
+}
+async function reportToDeveloper() {
+  const details = String(el('report-details').value ?? '').trim();
+  if (!details) { el('report-details').focus(); throw new Error('כתבו את תוכן הדיווח לפני השליחה.'); }
+  if (details.length > 5000) throw new Error('הדיווח יכול להכיל עד 5,000 תווים.');
+  const email = reporterHasEmail === true ? '' : String(el('report-email').value ?? '').trim();
+  if (email && el('report-email').checkValidity && !el('report-email').checkValidity()) throw new Error('כתובת המייל אינה תקינה.');
+  const result = await call('feedback.report', { details, reportType: el('report-type').value || 'bug', ...(email ? { reporterEmail: email } : {}) });
+  if (result === 'sent' || result === 'queued') {
+    el('report-details').value = '';
+    message(result === 'sent' ? 'הדיווח למפתח נשלח דרך מערכת הדיווחים של אוצריא.' : 'הדיווח למפתח נשמר בתור של אוצריא ויישלח כשיתאפשר.', false);
+  } else if (result === 'cancelled') message('שליחת הדיווח בוטלה. הנוסח נשמר כאן לעריכה.');
+  else throw new Error('לא התקבל אישור לשליחת הדיווח. הנוסח נשמר; בדקו באוצריא לפני ניסיון נוסף.');
 }
 // One user operation at a time in this page; session operations are also
 // serialized inside the controller.
@@ -174,8 +220,22 @@ async function tabForToolbar(event) {
 const initializationStarted = new Promise(resolve => { startInitialization = resolve; });
 const afterBoot = task => initializationStarted.then(() => initialized).then(task);
 function requestEdit(event, fromToolbar) {
-  if (!['correct-book', 'correct-selection'].includes(event?.itemId)) return;
+  if (!['correct-book', 'correct-selection', 'send-book-corrections'].includes(event?.itemId)) return;
   afterBoot(() => run(async () => {
+    if (event.itemId === 'send-book-corrections') {
+      await refreshTabs();
+      const candidates = openTabs.filter(tab => sameBook(tab, event));
+      const bookUid = event.bookUid ?? event.selection?.bookUid ?? (event.currentId != null ? `id:${event.currentId}` : null) ?? (candidates.length === 1 ? candidates[0].bookUid : null);
+      if (!bookUid) throw new Error('לא זוהה הספר לשליחה. לחצו לחיצה ימנית בתוך הספר ונסו שוב.');
+      const live = liveFor(bookUid);
+      if (live && !(await controller.save(live.snapshot.sessionId)).saved) throw new Error('שמירת התיקונים עדיין לא הושלמה. נסו שוב לאחר שמירת הטיוטה.');
+      await reload();
+      const pending = state.books.get(bookUid)?.pending ?? [];
+      if (!pending.length) { notify('אין תיקונים ממתינים לשליחה בספר הזה.'); return; }
+      if (!await confirm('שליחת תיקוני הספר', `לשלוח ${pending.length} הצעות תיקון מהספר? הדיווחים יישלחו עם כתובת המייל המוגדרת בדיווח השגיאות של אוצריא. הספר המקומי אינו משתנה.`)) return;
+      await sendItems(bookUid, pending.map(item => item.sectionIndex));
+      return;
+    }
     const tabId = event.selection?.tabId ?? event.tabId ?? (fromToolbar || !event.selection ? await tabForToolbar(event) : null);
     if (!tabId) throw new Error('לא זוהתה לשונית הספר. לחצו לחיצה ימנית בתוך הספר ובחרו „תיקון הספר בקורא”.');
     await beginFor(tabId);
@@ -202,7 +262,7 @@ async function sendItems(bookUid, keys) {
   const live = liveFor(bookUid);
   if (live) {
     const saved = await controller.save(live.snapshot.sessionId);
-    if (!saved.saved) message('השינויים האחרונים בקורא עדיין נשמרים באוצריא; נשלחים התיקונים שכבר נשמרו בתוסף.');
+    if (!saved.saved) throw new Error('שמירת התיקונים עדיין לא הושלמה. נסו שוב לאחר שמירת הטיוטה.');
   }
   let sent = 0, queued = 0, kept = 0, book = null, queue = [];
   // One storage read per batch; re-read only after an ID conflict changed an item.
@@ -225,7 +285,7 @@ async function sendItems(bookUid, keys) {
     }
     let result = await attempt(false);
     if (result.status === 'needs_decision') {
-      const free = await confirm('לא ניתן לשלוח כתיקון מובנה', `את התיקון בפסקה ${item.sectionIndex + 1} אי אפשר למפות במדויק למקור הספר. אפשר לשלוח אותו כדיווח חופשי, אך דיווח חופשי מגיע לדוא״ל בלבד ואינו נכנס לתור התיקונים באתר. לשלוח כדיווח חופשי?`);
+      const free = await confirm('התיקון דורש בדיקה ידנית', `אוצריא לא הצליחה להכין תיקון מובנה לפסקה ${item.sectionIndex + 1}. זה עשוי לקרות בשינוי שחוצה תגיות עיצוב או בפסקה ארוכה מדי. אפשר לשלוח את המקור וההצעה כדיווח חופשי לבדיקה ידנית; אופן הטיפול תלוי במקור הספר ובשרת. לשלוח לבדיקה ידנית? ביטול ישאיר את ההצעה שמורה.`);
       result = free ? await attempt(true) : { status: 'kept' };
     }
     if (result.status === 'id_conflict') {
@@ -235,14 +295,14 @@ async function sendItems(bookUid, keys) {
       result = { status: 'kept' };
     }
     if (result.status === 'email_required') throw new Error('לפני השליחה יש לשמור כתובת מייל בהגדרות דיווח השגיאות של אוצריא.');
-    if (result.status === 'source_changed') message(`המקור של פסקה ${item.sectionIndex + 1} השתנה; התיקון לא נשלח ונשמר.`, true);
+    if (result.status === 'source_changed') notify(`המקור של פסקה ${item.sectionIndex + 1} השתנה; התיקון לא נשלח ונשמר.`, true);
     if (result.status === 'sent') sent++; else if (result.status === 'queued') queued++; else kept++;
     if (!['sent', 'queued'].includes(result.status)) keys = keys.filter(index => index !== item.sectionIndex);
   }
   const parts = [];
   if (sent) parts.push(`${sent} נשלחו דרך אוצריא`); if (queued) parts.push(`${queued} נשמרו בתור של אוצריא וטרם נשלחו לאתר`);
   if (kept) parts.push(`${kept} נשארו לטיפול`);
-  if (parts.length) message(parts.join('; ') + '.', kept > 0 && !sent && !queued, 8000);
+  if (parts.length) notify(parts.join('; ') + '.', kept > 0 && !sent && !queued);
   // Remove fully handled versions only when no live session can still add to them.
   if (!liveFor(bookUid)) await store.compact(await store.load(), bookUid).catch(() => 0);
 }
@@ -308,7 +368,7 @@ const legacyCovered = (change, saved) => saved.sectionIndex === change.sectionIn
 async function sendLegacyReport(draft, report) {
   await ensureEmail();
   const bookUid = draft.bookUid ?? `legacy:${draft.bookId}`;
-  if (report.submission.forceFreeText && !await confirm('שליחה כדיווח חופשי', 'הדיווח הזה הוכן בגרסה הקודמת כדיווח חופשי. דיווח חופשי מגיע לדוא״ל בלבד ואינו נכנס לתור התיקונים באתר. לשלוח?')) return;
+  if (report.submission.forceFreeText && !await confirm('שליחה לבדיקה ידנית', 'הדיווח הזה הוכן בגרסה הקודמת כדיווח חופשי עם המקור וההצעה. אופן הטיפול בו תלוי במקור הספר ובשרת. לשלוח לבדיקה ידנית?')) return;
   const { allowQueue, forceFreeText, ...submission } = report.submission;
   const params = { ...submission, allowQueue: true, ...(forceFreeText ? { forceFreeText: true } : { requireTextCorrection: true }) };
   await store.recordSubmission(bookUid, report.key, report.reportId, 'attempt');
@@ -329,6 +389,7 @@ async function sendLegacyReport(draft, report) {
 function renderLive() {
   const cards = [];
   for (const item of controller.sessions.values()) {
+    if (item.ended && item.saved) continue;
     const snapshot = item.snapshot, card = node('article', 'card');
     card.append(node('h3', '', snapshot.bookId));
     const draft = snapshot.draft ?? {};
@@ -357,15 +418,15 @@ function renderLive() {
     return row;
   });
   el('tab-list').replaceChildren(...rows);
+  el('tab-list').hidden = !rows.length && cards.length > 0;
+  if (!rows.length && !cards.length) el('tab-list').append(node('p', '', 'פתחו ספר טקסט באוצריא כדי להתחיל לתקן.'),
+    node('p', 'hint', 'אפשר להתחיל גם מתוך הספר: לחיצה ימנית ← תיקון הספר בקורא. לשליחה בלי לפתוח את התוסף: שליחת תיקוני הספר בסרגל הקורא.'));
 }
 // Like Otzaria's TextCorrectionDiffView: one bordered box, removed words
 // struck through on errorContainer, added words bold on primaryContainer.
-function diffView(before, after) {
+function diffView(before, after, raw) {
   const box = node('div', 'diff');
-  for (const segment of computeTextDiff(before ?? '', after ?? '')) {
-    box.append(segment.op === 'equal' ? document.createTextNode?.(segment.text) ?? node('span', '', segment.text)
-      : node(segment.op === 'removed' ? 'del' : 'ins', '', segment.text));
-  }
+  appendFormattedDiff(box, before ?? '', after ?? '', raw);
   // A long paragraph scrolls inside the box; start at the first change.
   queueMicrotask(() => {
     const first = box.querySelector?.('del, ins');
@@ -375,20 +436,23 @@ function diffView(before, after) {
 }
 function changeView(item) {
   const view = node('div', 'change');
-  view.append(node('strong', '', `פסקה ${item.sectionIndex + 1}`), diffView(item.originalText, item.proposedText));
+  view.append(node('strong', '', `פסקה ${item.sectionIndex + 1}`), diffView(item.originalText, item.proposedText, item.originalSourceText));
   if (item.proposedText === '') view.append(node('p', 'hint', '(מחיקת הפסקה)'));
   return view;
 }
 function renderBooks() {
   const cards = [];
+  let pendingCount = 0, conflictCount = 0;
   for (const book of state.books.values()) {
+    pendingCount += book.pending.length;
+    conflictCount += book.conflicts.length;
     if (!book.pending.length && !book.conflicts.length) continue;
     const card = node('article', 'card'), live = liveFor(book.bookUid);
     card.append(node('h3', '', book.bookId ?? book.bookUid));
     if (book.pending.length) {
       const header = node('div', 'row');
       header.append(node('span', 'grow', `${book.pending.length} תיקונים ממתינים לשליחה`),
-        button('שלח הכל', () => sendItems(book.bookUid, book.pending.map(item => item.sectionIndex)), { ghost: false, key: `send:${book.bookUid}` }));
+        button('שלח הכל', () => sendItems(book.bookUid, book.pending.map(item => item.sectionIndex)), { ghost: false, key: `send:${book.bookUid}`, describe: `שליחת ${book.pending.length} התיקונים של ${book.bookId ?? book.bookUid}` }));
       if (live) {
         // One proposal per paragraph can be shown in the reader at a time.
         const hidden = book.pending.filter((item, index, all) => !live.snapshot.changes.some(change => change.sectionIndex === item.sectionIndex) &&
@@ -431,6 +495,7 @@ function renderBooks() {
     cards.push(card);
   }
   if (!cards.length) cards.push(node('p', 'hint', 'אין תיקונים שממתינים לשליחה.'));
+  el('pending-count').textContent = [pendingCount ? `${pendingCount} ממתינים` : '', conflictCount ? `${conflictCount} דורשים החלטה` : ''].filter(Boolean).join(' · ');
   el('book-list').replaceChildren(...cards);
 }
 function renderLegacy() {
@@ -483,7 +548,7 @@ function renderHistory() {
   for (const book of state.books.values()) for (const item of book.history) {
     const record = item.record;
     const row = node('article', 'card');
-    row.append(node('h3', '', `${item.title ?? book.bookId ?? book.bookUid}${Number.isInteger(item.sectionIndex) ? ` — פסקה ${item.sectionIndex + 1}` : ''}`), typeof item.originalText === 'string' ? diffView(item.originalText, item.proposedText) : node('p', 'after', item.proposedText || '(מחיקה)'),
+    row.append(node('h3', '', `${item.title ?? book.bookId ?? book.bookUid}${Number.isInteger(item.sectionIndex) ? ` — פסקה ${item.sectionIndex + 1}` : ''}`), typeof item.originalText === 'string' ? diffView(item.originalText, item.proposedText, item.originalSourceText) : node('p', 'after', item.proposedText || '(מחיקה)'),
       node('p', 'hint', `${deliveryLabel(record.result) ?? record.status} · ${new Date(record.at).toLocaleDateString('he-IL')} · ${record.result?.reportId ?? ''}`));
     rows.push(row);
   }
@@ -493,6 +558,7 @@ function renderHistory() {
       node('p', 'hint', `נשלח בגרסה הקודמת · ${new Date(item.sentAt).toLocaleDateString('he-IL')} · ${item.id}`));
     rows.push(row);
   }
+  el('history-count').textContent = rows.length ? String(rows.length) : '';
   if (!rows.length) rows.push(node('p', 'hint', 'אין עדיין תיקונים שנשלחו.'));
   el('history-list').replaceChildren(...rows);
 }
@@ -503,9 +569,9 @@ function renderSettings() {
 }
 function render() {
   const focused = document.activeElement?.dataset?.focusKey;
-  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings();
+  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport();
   el('refresh').disabled = busy;
-  if (focused) document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
 async function initialize(boot) {
   background = boot?.app?.runMode === 'background';
@@ -531,6 +597,21 @@ async function initialize(boot) {
 }
 // Read the choice now: run() renders first, which resets the box to the stored value.
 el('marks-toggle').addEventListener('change', event => { const enabled = event.target.checked; run(() => setMarks(enabled)); });
+for (const [index, screen] of mainScreens.entries()) {
+  el(`nav-${screen}`).addEventListener('click', () => showScreen(screen));
+  el(`nav-${screen}`).addEventListener('keydown', event => {
+    let next;
+    if (event.key === 'ArrowLeft') next = (index + 1) % mainScreens.length;
+    if (event.key === 'ArrowRight') next = (index + mainScreens.length - 1) % mainScreens.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = mainScreens.length - 1;
+    if (next !== undefined) { event.preventDefault(); showScreen(mainScreens[next], true); }
+  });
+}
+el('nav-report').addEventListener('click', () => { showScreen('report'); el('report-details').focus(); });
+el('report-back').addEventListener('click', () => showScreen(lastMainScreen, true));
+el('report-details').addEventListener('input', () => { if (currentScreen === 'report') message(); renderReport(); });
+el('report-send').addEventListener('click', () => { afterBoot(() => run(reportToDeveloper)).catch(error => notify(errorText(error), true)); });
 el('refresh').addEventListener('click', () => run(async () => { await refreshTabs(); await controller.recoverOrphans(); }));
 el('embedded-native').addEventListener('click', () => run(async () => {
   await call('reader.setDefaultTextReader', { enabled: false }).catch(() => {});
