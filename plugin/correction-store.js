@@ -37,6 +37,16 @@ function copyChange({ sectionIndex, originalSourceText, originalText, proposedTe
 const sameChange = (a, b) => a.sectionIndex === b.sectionIndex && a.originalSourceText === b.originalSourceText && a.proposedText === b.proposedText;
 
 export function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${now()}-${Math.random().toString(36).slice(2)}` } = {}) {
+  // nc records are immutable. Always list keys to discover other instances'
+  // writes/removals, but do not fetch every historical record after each click.
+  // Acknowledgement readbacks below deliberately bypass this cache.
+  const recordCache = new Map();
+  let recordReads = Promise.resolve();
+  function readRecords() {
+    const result = recordReads.then(() => readAll(call, recordCache));
+    recordReads = result.catch(() => {});
+    return result;
+  }
   async function setOnce(key, value) {
     // Immutable record: an existing value is the same content and is kept.
     if (await call('storage.get', { key }) != null) return false;
@@ -95,7 +105,7 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
      * later unresolved begin intent. Otherwise null (the contract carries no
      * session identity in drafts). */
     async attributionFor(bookUid) {
-      const records = await readAll(call);
+      const records = await readRecords();
       const sessions = records.filter(({ key, value }) => key.startsWith(SESSION) && value.bookUid === bookUid).map(({ value }) => value);
       const finals = new Set(records.filter(({ key, value }) => key.startsWith(FINAL) && value.bookUid === bookUid).map(({ value }) => value.sessionId));
       const latest = sessions.sort((a, b) => a.beganAt - b.beganAt).at(-1);
@@ -112,7 +122,7 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
      * [baseVersion] is the newest version the session built on, so proposals
      * with a higher version are later and independent. */
     async markInherited(sessionId, bookUid, sections, baseVersion = null) {
-      const base = Number.isSafeInteger(baseVersion) ? baseVersion : await newestStoredVersion(call, bookUid);
+      const base = Number.isSafeInteger(baseVersion) ? baseVersion : await newestStoredVersion(readRecords, bookUid);
       for (const sectionIndex of new Set(sections)) {
         await setOnce(`${INHERITED}${keyPart(bookUid)}:${keyPart(sessionId)}:${sectionIndex}`,
           { schema: SCHEMA, sessionId, bookUid, sectionIndex, base });
@@ -136,7 +146,7 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
       const change = copyChange({ ...items[0], proposedText });
       const id = hash(['merge', bookUid, items.map(item => item.key).sort(), proposedText]);
       const key = `${MERGED}${keyPart(bookUid)}:${id}`;
-      const version = await newestStoredVersion(call, bookUid) + 1;
+      const version = await newestStoredVersion(readRecords, bookUid) + 1;
       const value = { schema: SCHEMA, bookUid, bookId: book.bookId, libraryVersion: book.libraryVersion,
         draftId: `merge-${id}`, version, sessionId: null, revision: null,
         changes: proposedText === change.originalText ? [] : [change], conflicts: [], savedAt: now(),
@@ -158,7 +168,11 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
       const generation = item.generation ?? 0;
       await store.recordSubmission(bookUid, item.key, reportIdFor(item.key, generation), 'id_consent', { generation });
     },
-    async load() { return mergeRecords(await readAll(call)); },
+    async load() {
+      const records = await readRecords();
+      return { ...mergeRecords(records), fingerprint: hash(records.map(record => record.key).sort()),
+        historyFingerprint: hash(records.filter(record => record.key.startsWith(RESOLVED)).map(record => record.key).sort()) };
+    },
     /** Removes only versions that are fully handled, after writing a floor that
      * makes the removal (and any late duplicate of those versions) inert.
      * Submission and resolution records (the history) are never removed. */
@@ -179,21 +193,44 @@ export function createCorrectionStore(call, { now = () => Date.now(), nonce = ()
   return store;
 }
 
-async function newestStoredVersion(call, bookUid) {
-  const versions = (await readAll(call)).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR) || key.startsWith(MERGED)) &&
+async function newestStoredVersion(readRecords, bookUid) {
+  const versions = (await readRecords()).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR) || key.startsWith(MERGED)) &&
     value.bookUid === bookUid && Number.isSafeInteger(value.version)).map(({ value }) => value.version);
   return versions.length ? Math.max(...versions) : 0;
 }
 
-async function readAll(call) {
-  const keys = (await call('storage.list')) ?? [];
-  const records = [];
-  for (const key of keys) {
-    if (!key.startsWith(PREFIX)) continue;
-    const value = await call('storage.get', { key });
-    if (value?.schema === SCHEMA) records.push({ key, value });
-  }
-  return records;
+async function readAll(call, cache = new Map()) {
+  const keys = ((await call('storage.list')) ?? []).filter(key => key.startsWith(PREFIX));
+  const present = new Set(keys);
+  for (const key of cache.keys()) if (!present.has(key)) cache.delete(key);
+  const records = new Array(keys.length);
+  let next = 0, failed = false, cachedChars = [...cache.values()].reduce((sum, value) => sum + value.length, 0);
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(3, keys.length) }, async () => {
+    try {
+    while (!failed && next < keys.length) {
+      const index = next++, key = keys[index];
+      let serialized = cache.get(key);
+      if (serialized === undefined) {
+        const value = await call('storage.get', { key });
+        if (value?.schema !== SCHEMA) continue;
+        serialized = JSON.stringify(value);
+        // About 8 MB of serialized UTF-16, at most 256 immutable records.
+        if (serialized.length <= 4 * 1024 * 1024) {
+          while (cache.size && (cache.size >= 256 || cachedChars + serialized.length > 4 * 1024 * 1024)) {
+            const oldest = cache.keys().next().value;
+            cachedChars -= cache.get(oldest).length; cache.delete(oldest);
+          }
+          cache.set(key, serialized); cachedChars += serialized.length;
+        }
+      }
+      // Fresh objects keep callers from mutating cached snapshots.
+      records[index] = { key, value: JSON.parse(serialized) };
+    }
+    } catch (error) { failed = true; throw error; }
+  }));
+  const failure = outcomes.find(result => result.status === 'rejected');
+  if (failure) throw failure.reason;
+  return records.filter(Boolean);
 }
 
 export function mergeRecords(records) {

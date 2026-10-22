@@ -193,7 +193,8 @@ function bytes(text) { return new TextEncoder().encode(text).length; }
  * Returned offsets are UTF-16 offsets into originalText, end exclusive.
  * Do not derive later section indexes from edited text; retain these anchors.
  */
-async function loadBook(call, identity, onProgress = () => {}, { signal, includeRaw = false } = {}) {
+async function loadBook(call, identity, onProgress = () => {}, { signal, includeRaw = false, deferSourceValidation = false } = {}) {
+  if (deferSourceValidation && !includeRaw) throw new Error('Deferred validation requires raw source.');
   if (typeof identity?.bookId !== 'string' || !identity.bookId) throw new Error('חסר זיהוי של הספר.');
   const details = await request(call, 'library.getBookDetails', identity, signal);
   if (details?.source !== 'library' || details?.type !== 'text') throw new Error('אפשר לערוך ספרי טקסט מספריית אוצריא בלבד.');
@@ -233,7 +234,14 @@ async function loadBook(call, identity, onProgress = () => {}, { signal, include
   // A DB section may contain an embedded newline. A matching count plus source
   // checks guards the fast path; mismatches use authoritative section maps.
   let trusted = lines.length === count;
-  if (trusted) {
+  // Correction restore validates every changed raw paragraph against the DB,
+  // atomically, including library version and revision. Reader source maps
+  // can refer to empty placeholders in a lazily loaded tab. They cannot be
+  // used to validate whole-book replacement previews in that session.
+  if (deferSourceValidation && !trusted) {
+    throw new Error('גבולות הפסקאות בתוכן הספר אינם תואמים למספר הפסקאות. אי אפשר להכין החלפה בטוחה; לא נעשה שינוי.');
+  }
+  if (trusted && !deferSourceValidation) {
     for (const index of new Set([0, count - 1])) {
       const map = await mapFor(index);
       if (map?.sourceText !== lines[index]) { trusted = false; break; }
@@ -459,6 +467,16 @@ function copyChange({ sectionIndex, originalSourceText, originalText, proposedTe
 const sameChange = (a, b) => a.sectionIndex === b.sectionIndex && a.originalSourceText === b.originalSourceText && a.proposedText === b.proposedText;
 
 function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${now()}-${Math.random().toString(36).slice(2)}` } = {}) {
+  // nc records are immutable. Always list keys to discover other instances'
+  // writes/removals, but do not fetch every historical record after each click.
+  // Acknowledgement readbacks below deliberately bypass this cache.
+  const recordCache = new Map();
+  let recordReads = Promise.resolve();
+  function readRecords() {
+    const result = recordReads.then(() => readAll(call, recordCache));
+    recordReads = result.catch(() => {});
+    return result;
+  }
   async function setOnce(key, value) {
     // Immutable record: an existing value is the same content and is kept.
     if (await call('storage.get', { key }) != null) return false;
@@ -517,7 +535,7 @@ function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${
      * later unresolved begin intent. Otherwise null (the contract carries no
      * session identity in drafts). */
     async attributionFor(bookUid) {
-      const records = await readAll(call);
+      const records = await readRecords();
       const sessions = records.filter(({ key, value }) => key.startsWith(SESSION) && value.bookUid === bookUid).map(({ value }) => value);
       const finals = new Set(records.filter(({ key, value }) => key.startsWith(FINAL) && value.bookUid === bookUid).map(({ value }) => value.sessionId));
       const latest = sessions.sort((a, b) => a.beganAt - b.beganAt).at(-1);
@@ -534,7 +552,7 @@ function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${
      * [baseVersion] is the newest version the session built on, so proposals
      * with a higher version are later and independent. */
     async markInherited(sessionId, bookUid, sections, baseVersion = null) {
-      const base = Number.isSafeInteger(baseVersion) ? baseVersion : await newestStoredVersion(call, bookUid);
+      const base = Number.isSafeInteger(baseVersion) ? baseVersion : await newestStoredVersion(readRecords, bookUid);
       for (const sectionIndex of new Set(sections)) {
         await setOnce(`${INHERITED}${keyPart(bookUid)}:${keyPart(sessionId)}:${sectionIndex}`,
           { schema: SCHEMA, sessionId, bookUid, sectionIndex, base });
@@ -558,7 +576,7 @@ function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${
       const change = copyChange({ ...items[0], proposedText });
       const id = hash(['merge', bookUid, items.map(item => item.key).sort(), proposedText]);
       const key = `${MERGED}${keyPart(bookUid)}:${id}`;
-      const version = await newestStoredVersion(call, bookUid) + 1;
+      const version = await newestStoredVersion(readRecords, bookUid) + 1;
       const value = { schema: SCHEMA, bookUid, bookId: book.bookId, libraryVersion: book.libraryVersion,
         draftId: `merge-${id}`, version, sessionId: null, revision: null,
         changes: proposedText === change.originalText ? [] : [change], conflicts: [], savedAt: now(),
@@ -580,7 +598,11 @@ function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${
       const generation = item.generation ?? 0;
       await store.recordSubmission(bookUid, item.key, reportIdFor(item.key, generation), 'id_consent', { generation });
     },
-    async load() { return mergeRecords(await readAll(call)); },
+    async load() {
+      const records = await readRecords();
+      return { ...mergeRecords(records), fingerprint: hash(records.map(record => record.key).sort()),
+        historyFingerprint: hash(records.filter(record => record.key.startsWith(RESOLVED)).map(record => record.key).sort()) };
+    },
     /** Removes only versions that are fully handled, after writing a floor that
      * makes the removal (and any late duplicate of those versions) inert.
      * Submission and resolution records (the history) are never removed. */
@@ -601,21 +623,44 @@ function createCorrectionStore(call, { now = () => Date.now(), nonce = () => `${
   return store;
 }
 
-async function newestStoredVersion(call, bookUid) {
-  const versions = (await readAll(call)).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR) || key.startsWith(MERGED)) &&
+async function newestStoredVersion(readRecords, bookUid) {
+  const versions = (await readRecords()).filter(({ key, value }) => (key.startsWith(ENTRY) || key.startsWith(FLOOR) || key.startsWith(MERGED)) &&
     value.bookUid === bookUid && Number.isSafeInteger(value.version)).map(({ value }) => value.version);
   return versions.length ? Math.max(...versions) : 0;
 }
 
-async function readAll(call) {
-  const keys = (await call('storage.list')) ?? [];
-  const records = [];
-  for (const key of keys) {
-    if (!key.startsWith(PREFIX)) continue;
-    const value = await call('storage.get', { key });
-    if (value?.schema === SCHEMA) records.push({ key, value });
-  }
-  return records;
+async function readAll(call, cache = new Map()) {
+  const keys = ((await call('storage.list')) ?? []).filter(key => key.startsWith(PREFIX));
+  const present = new Set(keys);
+  for (const key of cache.keys()) if (!present.has(key)) cache.delete(key);
+  const records = new Array(keys.length);
+  let next = 0, failed = false, cachedChars = [...cache.values()].reduce((sum, value) => sum + value.length, 0);
+  const outcomes = await Promise.allSettled(Array.from({ length: Math.min(3, keys.length) }, async () => {
+    try {
+    while (!failed && next < keys.length) {
+      const index = next++, key = keys[index];
+      let serialized = cache.get(key);
+      if (serialized === undefined) {
+        const value = await call('storage.get', { key });
+        if (value?.schema !== SCHEMA) continue;
+        serialized = JSON.stringify(value);
+        // About 8 MB of serialized UTF-16, at most 256 immutable records.
+        if (serialized.length <= 4 * 1024 * 1024) {
+          while (cache.size && (cache.size >= 256 || cachedChars + serialized.length > 4 * 1024 * 1024)) {
+            const oldest = cache.keys().next().value;
+            cachedChars -= cache.get(oldest).length; cache.delete(oldest);
+          }
+          cache.set(key, serialized); cachedChars += serialized.length;
+        }
+      }
+      // Fresh objects keep callers from mutating cached snapshots.
+      records[index] = { key, value: JSON.parse(serialized) };
+    }
+    } catch (error) { failed = true; throw error; }
+  }));
+  const failure = outcomes.find(result => result.status === 'rejected');
+  if (failure) throw failure.reason;
+  return records.filter(Boolean);
 }
 
 function mergeRecords(records) {
@@ -1425,9 +1470,10 @@ function markTargets(state) {
   return targets.slice(0, markLimit);
 }
 
-function createReaderMarks(call) {
+function createReaderMarks(call, { now = () => Date.now(), retryDelay = 5000 } = {}) {
   const drawn = new Map();
-  let running = Promise.resolve(), wake = null, revision = null;
+  const misses = new Map();
+  let running = null, pending = null, wake = null, revision = null;
   async function draw(target) {
     const found = await call('reader.findTextOccurrences', { bookId: target.bookId, bookUid: target.bookUid, sectionIndex: target.sectionIndex,
       query: target.text, layer: 'source', limit: 200 });
@@ -1444,43 +1490,82 @@ function createReaderMarks(call) {
     await call('storage.set', { key: MARK_WAKE_KEY, value });
     wake = value;
   }
-  // Brings the reader's marks in line with the pending proposals. Failures of
-  // one mark do not stop the others; the next sync tries again.
+  async function drawState(state, enabled) {
+    const targets = enabled ? markTargets(state) : [];
+    const wanted = new Map(targets.map(target => [target.id, target]));
+    for (const id of misses.keys()) if (!wanted.has(id)) misses.delete(id);
+    let failed = 0;
+    for (const [id, signature] of drawn) {
+      const target = wanted.get(id);
+      if (target && signature === signatureOf(target)) continue;
+      await call('reader.clearHighlight', { highlightId: id }).catch(() => {});
+      drawn.delete(id);
+    }
+    for (const target of targets) {
+      if (drawn.has(target.id)) continue;
+      const signature = signatureOf(target), miss = misses.get(target.id);
+      if (miss?.signature === signature && miss.retryAt > now()) continue;
+      try {
+        if (await draw(target)) { drawn.set(target.id, signature); misses.delete(target.id); }
+        else misses.set(target.id, { signature, retryAt: now() + retryDelay });
+      } catch { failed++; misses.set(target.id, { signature, retryAt: now() + retryDelay }); }
+    }
+    await setWake(enabled && targets.length > 0).catch(() => {});
+    const next = revisionOf(targets, enabled);
+    if (next !== revision) { await call('storage.set', { key: MARK_REVISION_KEY, value: next }).catch(() => {}); revision = next; }
+    return { drawn: drawn.size, wanted: targets.length, failed };
+  }
+  // Keep one current draw and one latest requested state. Intermediate
+  // reloads must not accumulate hundreds of obsolete reader lookups.
   function sync(state, enabled) {
-    running = running.catch(() => {}).then(async () => {
-      const targets = enabled ? markTargets(state) : [];
-      const wanted = new Map(targets.map(target => [target.id, target]));
-      let failed = 0;
-      for (const [id, signature] of drawn) {
-        const target = wanted.get(id);
-        if (target && signature === signatureOf(target)) continue;
-        await call('reader.clearHighlight', { highlightId: id }).catch(() => {});
-        drawn.delete(id);
-      }
-      for (const target of targets) {
-        if (drawn.has(target.id)) continue;
-        try { if (await draw(target)) drawn.set(target.id, signatureOf(target)); }
-        catch { failed++; }
-      }
-      await setWake(enabled && targets.length > 0).catch(() => {});
-      const next = revisionOf(targets, enabled);
-      if (next !== revision) { await call('storage.set', { key: MARK_REVISION_KEY, value: next }).catch(() => {}); revision = next; }
-      return { drawn: drawn.size, wanted: targets.length, failed };
+    pending = { state, enabled };
+    if (running) return running;
+    running = Promise.resolve().then(async () => {
+      let result;
+      try {
+        while (pending) {
+          const next = pending; pending = null;
+          result = await drawState(next.state, next.enabled);
+        }
+        return result;
+      } finally { running = null; }
     });
     return running;
   }
   // True when another instance synced a different set of marks.
   async function outdated() {
+    if ([...misses.values()].some(miss => miss.retryAt <= now())) return true;
     if (revision === null) return false;
     return (await call('storage.get', { key: MARK_REVISION_KEY }).catch(() => revision)) !== revision;
   }
   async function clearAll() {
-    drawn.clear();
+    drawn.clear(); misses.clear();
     await call('reader.clearAllHighlights', {}).catch(() => {});
   }
   return { sync, outdated, clearAll, drawn };
 }
 
+
+// Keep only one active session's source, in memory. Every application still
+// validates all source paragraphs in Otzaria; cache never authorizes a write.
+function createReplacementBookLoader(call) {
+  let cached = null;
+  return {
+    clear() { cached = null; },
+    async load(snapshot, onProgress) {
+      if (!snapshot?.sessionId || !snapshot.bookUid || !snapshot.libraryVersion) {
+        throw new Error('נדרש סשן עריכה פעיל ומזוהה כדי לטעון את הספר להחלפה.');
+      }
+      const key = JSON.stringify([snapshot.sessionId, snapshot.bookUid, snapshot.libraryVersion]);
+      if (cached?.key === key) return cached.promise;
+      const entry = { key, promise: loadBook(call, { bookId: snapshot.bookId, bookUid: snapshot.bookUid }, onProgress,
+        { includeRaw: true, deferSourceValidation: true }) };
+      cached = entry;
+      try { return await entry.promise; }
+      catch (error) { if (cached === entry) cached = null; throw error; }
+    }
+  };
+}
 const replaceWordCharacter = /[\p{L}\p{N}\p{M}_]/u;
 const replaceUnsupportedText = /[<>\r\n\u2028\u2029]|&(?:#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/;
 function replacementFailure(message, code = 'invalid_params') {
@@ -1559,6 +1644,107 @@ function planReplacements(book, snapshot, { query, replacement, wholeWords = tru
 }
 
 
+// The native API supplies the field text only when its button is clicked.
+// It cannot add an input or rename the native search field. Keep both phases
+// explicit, bound to the exact book/tab/session, and require final confirmation.
+function createReaderReplacement({ call, controller, loader, confirm, notify,
+  now = () => Date.now(), lifetime = 120000 }) {
+  let remembered = null, active = null, generation = 0;
+  const cancelled = new Map();
+  function cancelQueued(sessionId) {
+    cancelled.set(sessionId, remembered);
+    if (cancelled.size > 50) cancelled.delete(cancelled.keys().next().value);
+  }
+  async function context() {
+    const state = await call('reader.getCurrentState');
+    const tab = state?.openTabs?.find(tab => tab.tabId === state.currentTabId);
+    const result = { tabId: state?.currentTabId, bookUid: state?.bookUid ?? tab?.bookUid,
+      bookId: state?.currentBookId ?? tab?.bookId ?? '',
+      type: state?.currentType ?? tab?.type, correctionSessionId: state?.currentCorrectionSessionId ?? tab?.correctionSessionId };
+    if (!result.tabId || !result.bookUid || result.type !== 'text') {
+      throw new Error('חיפוש והחלפה זמינים רק בספר טקסט פתוח ומזוהה.');
+    }
+    return result;
+  }
+  const same = (a, b) => a.tabId === b.tabId && a.bookUid === b.bookUid;
+  async function end(sessionId) { await call('search.endFieldSession', { sessionId }).catch(() => {}); }
+  return {
+    async invoked(event) {
+      if (event?.actionId !== 'replace-in-book' || event.field !== 'inBook') return;
+      if (cancelled.has(event.sessionId)) {
+        if (remembered === cancelled.get(event.sessionId)) remembered = null;
+        cancelled.delete(event.sessionId);
+        await end(event.sessionId); notify('מצב ההחלפה בוטל. התחילו מחדש עם הטקסט לחיפוש.'); return;
+      }
+      const token = ++generation;
+      active = { sessionId: event.sessionId, phase: remembered ? 'apply' : 'remember' };
+      const check = () => { if (token !== generation) throw new Error('הפעולה בוטלה כי שדה החיפוש השתנה או נסגר.'); };
+      try {
+        const current = await context(); check();
+        if (!remembered) {
+          if (typeof event.text !== 'string' || !event.text.trim() || event.text.length > 500 || /[\r\n]/.test(event.text)) {
+            throw new Error('כתבו בתיבת החיפוש מילה או ביטוי מדויק לחיפוש (עד 500 תווים), ולחצו על הכפתור.');
+          }
+          const snapshot = current.correctionSessionId ? await controller.inspect(current.correctionSessionId) : await controller.begin(current.tabId);
+          check();
+          remembered = { ...current, sessionId: snapshot.sessionId, query: event.text, at: now(), fieldSessionId: event.sessionId };
+          await call('search.setFieldActionState', { sessionId: event.sessionId, state: 'active',
+            tooltip: 'בחרו את כל הטקסט בשדה, כתבו את החלופה ולחצו שוב. לחיצה בלי עריכה מבטלת.' }).catch(error => {
+              if (error?.code !== 'error.not_found') throw error; // User already started typing the alternative.
+            });
+          notify(`נשמר החיפוש המדויק „${event.text}” בספר „${snapshot.bookId}”. כעת בחרו את כל הטקסט בתיבת החיפוש, הקלידו את החלופה ולחצו שוב על כפתור ההחלפה. שדה החיפוש עדיין משמש גם לחיפוש הרגיל. להחלפה במחיקה אפשר להשאיר אותו ריק.`);
+          return;
+        }
+        const request = remembered; remembered = null;
+        if (!same(current, request) || current.correctionSessionId !== request.sessionId || now() - request.at > lifetime) {
+          throw new Error('הספר, הלשונית או סשן העריכה השתנו, או שחלף זמן ההמתנה. התחילו מחדש עם הטקסט לחיפוש.');
+        }
+        if (typeof event.text !== 'string') throw new Error('לא התקבל טקסט חלופי משדה החיפוש.');
+        await call('search.setFieldActionState', { sessionId: event.sessionId, state: 'busy', tooltip: 'מכין תצוגת החלפה לאישור' });
+        const snapshot = await controller.inspect(request.sessionId);
+        const book = await loader.load(snapshot);
+        const latest = await controller.inspect(request.sessionId); check();
+        const plan = planReplacements(book, latest, { query: request.query, replacement: event.text, wholeWords: true });
+        if (!plan.occurrences) { notify('לא נמצאו התאמות מדויקות להחלפה. לא נעשה שינוי.'); return; }
+        if (!same(await context(), request)) throw new Error('הספר או הלשונית השתנו. לא נעשה שינוי.');
+        check();
+        if (!await confirm('החלפת כל ההתאמות בספר', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש מדויק של מילים שלמות: ${plan.query.slice(0, 200)}\nהחלפה: ${event.text ? event.text.slice(0, 200) : '(מחיקה)'}\n\nהנוסח יעודכן בטיוטת הקורא בלבד. דיווחים לא יישלחו.`)) {
+          notify('ההחלפה בוטלה. לא נעשה שינוי.'); return;
+        }
+        check();
+        if (!same(await context(), request)) throw new Error('הספר או הלשונית השתנו בזמן האישור. לא נעשה שינוי.');
+        check();
+        const result = await controller.applyReplacements(plan);
+        notify(`${plan.occurrences} החלפות הוחלו בקורא${result.saved ? ' ונשמרו בתוסף' : ' וממתינות לשמירת הטיוטה באוצריא'}. לא נשלחו דיווחים.`);
+      } catch (error) {
+        remembered = null; loader.clear();
+        throw error;
+      } finally {
+        if (!remembered) { await end(event.sessionId); if (active?.sessionId === event.sessionId) active = null; }
+      }
+    },
+    async stop(event) {
+      if (active?.sessionId !== event?.sessionId) {
+        if (event?.actionId === 'replace-in-book' && event.sessionId) { cancelQueued(event.sessionId); await end(event.sessionId); }
+        return;
+      }
+      remembered = null; active = null; generation++;
+      await end(event.sessionId); notify('מצב ההחלפה בוטל. לא נעשה שינוי.');
+    },
+    ended(event) {
+      if (active?.sessionId !== event?.sessionId) {
+        if (event?.actionId === 'replace-in-book' && event.sessionId && event.reason !== 'plugin') cancelQueued(event.sessionId);
+        return;
+      }
+      // Typing the alternative ends phase one's native field session. Retain
+      // only the remembered search; the next click creates a new native lease.
+      if (event.reason === 'edited' && active.phase === 'remember') { active = null; return; }
+      remembered = null; active = null; generation++;
+    }
+  };
+}
+
+
 const SEND_VISIBILITY_KEY = 'hasPendingCorrections';
 function hasPendingCorrections(state, sessions, activeElsewhere = new Map()) {
   const active = [...sessions.values()].filter(item => !item.ended);
@@ -1625,7 +1811,12 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
   }
   function add(event, data, persist = true) {
     entries.push({ at: now(), event: token(event) ?? 'unknown', ...clean(data) });
-    if (entries.length > maxEntries) entries.splice(0, entries.length - maxEntries);
+    while (entries.length > maxEntries) {
+      const isError = e => /error|failed/.test(e.event);
+      const keepErrors = entries.filter(isError).length <= Math.min(20, maxEntries);
+      const discard = keepErrors ? entries.findIndex(e => !isError(e)) : 0;
+      entries.splice(discard < 0 ? 0 : discard, 1);
+    }
     if (persist && started && timer === null) timer = schedule(() => { timer = null; api.flush(); }, 800);
   }
   function summary(value) {
@@ -1691,11 +1882,14 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
         const safeMethod = token(method) ?? 'unknown';
         const counterKey = counters.has(safeMethod) || counters.size < 100 ? safeMethod : 'other';
         counters.set(counterKey, (counters.get(counterKey) ?? 0) + 1);
-        add('rpc.start', { method: safeMethod, request, book: reference(args?.bookUid), session: reference(args?.sessionId),
+        // Frequent state reloads must not erase the failure being diagnosed.
+        // Counts still include successful storage reads; their errors remain detailed.
+        const quiet = method === 'storage.get' || method === 'storage.list';
+        if (!quiet) add('rpc.start', { method: safeMethod, request, book: reference(args?.bookUid), session: reference(args?.sessionId),
           sectionIndex: args?.sectionIndex, offset: args?.offset, length: args?.length });
         try {
           const result = await invoke(method, args, options);
-          add('rpc.ok', { method: safeMethod, request, durationMs: now() - at, ...summary(result) });
+          if (!quiet) add('rpc.ok', { method: safeMethod, request, durationMs: now() - at, ...summary(result) });
           return result;
         } catch (error) {
           add('rpc.error', { method: safeMethod, request, durationMs: now() - at, code: token(error?.code) ?? 'unknown', name: token(error?.name) ?? 'Error', frame: frame(error) });
@@ -1782,9 +1976,12 @@ let background = false;
 const mainScreens = ['work', 'history', 'settings'];
 let currentScreen = 'work', lastMainScreen = 'work', reporterHasEmail = null;
 const screenScroll = new Map();
+const renderedGroups = new Map();
+let buildingActions = null, legacySignature = '', replaceOptions = '', renderedReplacePlan;
 // Pending proposals are marked green in the reader (a setting, on by default).
 const marks = createReaderMarks(call);
 const sendVisibility = createSendVisibility(call);
+const replacementBooks = createReplacementBookLoader(call);
 let replacePlan = null, replaceNotice = '';
 let marksOn = true, highlightGranted = true, refCheck = 0;
 const reasons = {
@@ -1837,6 +2034,7 @@ function button(label, action, { ghost = true, key, disabled = false, describe, 
   if (key) item.dataset.focusKey = key;
   if (describe) item.setAttribute('aria-label', describe);
   item.disabled = disabled || busy;
+  buildingActions?.push({ item, disabled });
   item.addEventListener('click', () => { diagnostics.record('ui.action', { name: key?.split(':')[0] ?? action.name }); return local ? action() : run(action); });
   return item;
 }
@@ -1900,9 +2098,10 @@ function openReplace(sessionId) {
 function renderReplace() {
   const select = el('replace-session'), selected = select.value;
   const active = [...controller.sessions.values()].filter(item => !item.ended);
-  select.replaceChildren(...active.map(item => {
+  const optionsKey = JSON.stringify(active.map(item => [item.snapshot.sessionId, item.snapshot.bookId]));
+  if (replaceOptions !== optionsKey) { select.replaceChildren(...active.map(item => {
     const option = node('option', '', item.snapshot.bookId); option.value = item.snapshot.sessionId; return option;
-  }));
+  })); replaceOptions = optionsKey; }
   select.value = active.some(item => item.snapshot.sessionId === selected) ? selected : active[0]?.snapshot.sessionId ?? '';
   if (replacePlan && (replacePlan.sessionId !== select.value || controller.sessions.get(select.value)?.snapshot.revision !== replacePlan.revision)) {
     replacePlan = null; replaceNotice = 'הנוסח בקורא השתנה. הציגו התאמות מחדש לפני החלפה.';
@@ -1912,20 +2111,27 @@ function renderReplace() {
   el('replace-apply').disabled = busy || !replacePlan?.occurrences;
   el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.` :
     replaceNotice || (active.length ? 'הציגו התאמות כדי לבדוק את הנוסח לפני ההחלפה.' : 'התחילו קודם עריכה של ספר בקורא כדי לחפש ולהחליף בו.');
-  el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
-  if (replacePlan?.previews.length > 20) el('replace-results').append(node('p', 'hint', 'מוצגות 20 הפסקאות הראשונות. ההחלפה תחול על כל ההתאמות שנספרו בספר.'));
+  if (renderedReplacePlan !== replacePlan) {
+    el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
+    if (replacePlan?.previews.length > 20) el('replace-results').append(node('p', 'hint', 'מוצגות 20 הפסקאות הראשונות. ההחלפה תחול על כל ההתאמות שנספרו בספר.'));
+    renderedReplacePlan = replacePlan;
+  }
 }
 async function previewReplacement() {
   replacePlan = null; replaceNotice = '';
   const sessionId = el('replace-session').value, live = controller.sessions.get(sessionId);
   if (!live || live.ended) throw new Error('התחילו עריכה של הספר בקורא לפני חיפוש והחלפה.');
-  const { bookId, bookUid } = live.snapshot;
-  const book = await loadBook(call, { bookId, bookUid }, progress => {
+  diagnostics.record('replacement.load.start');
+  const began = Date.now();
+  const book = await replacementBooks.load(live.snapshot, progress => {
     if (progress.phase === 'content') message(`טוען את נוסח הספר לחיפוש… ${progress.loaded.toLocaleString('he-IL')} תווים`);
-  }, { includeRaw: true });
+  });
+  diagnostics.record('replacement.load.ok', { durationMs: Date.now() - began, count: book.sections.length });
   const snapshot = await controller.inspect(sessionId);
-  replacePlan = planReplacements(book, snapshot, { query: String(el('replace-query').value ?? ''),
-    replacement: String(el('replace-with').value ?? ''), wholeWords: el('replace-whole-words').checked });
+  try {
+    replacePlan = planReplacements(book, snapshot, { query: String(el('replace-query').value ?? ''),
+      replacement: String(el('replace-with').value ?? ''), wholeWords: el('replace-whole-words').checked });
+  } catch (error) { replacementBooks.clear(); throw error; }
   message(replacePlan.occurrences ? 'התצוגה המקדימה מוכנה. בדקו אותה לפני החלפה.' : 'לא נמצאו התאמות לחיפוש בנוסח הנוכחי.');
 }
 async function applyReplacement() {
@@ -1933,7 +2139,9 @@ async function applyReplacement() {
   if (!plan?.occurrences) throw new Error('הציגו התאמות לפני החלפה.');
   if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.`)) return;
   replacePlan = null;
-  const result = await controller.applyReplacements(plan);
+  let result;
+  try { result = await controller.applyReplacements(plan); }
+  catch (error) { replacementBooks.clear(); throw error; }
   replaceNotice = 'ההחלפה הוחלה. אפשר לבצע חיפוש נוסף בנוסח המעודכן.';
   message(result.saved ? `${plan.occurrences} החלפות הוחלו בקורא ונשמרו בתוסף. לא נשלחו דיווחים.` :
     `${plan.occurrences} החלפות הוחלו בקורא וממתינות לשמירת הטיוטה באוצריא. לא נשלחו דיווחים.`);
@@ -1948,7 +2156,10 @@ function run(action) {
     diagnostics.record('operation.start', { name: action.name || 'anonymous' });
     try { await action(); diagnostics.record('operation.ok', { durationMs: Date.now() - began }); }
     catch (error) { diagnostics.error('operation.error', error); notify(errorText(error), true); }
-    finally { busy = false; await reload().catch(error => { diagnostics.error('reload.error', error); message(error.message, true); }); diagnostics.flush(); }
+    finally {
+      await reload().catch(error => { diagnostics.error('reload.error', error); message(error.message, true); });
+      busy = false; render(); diagnostics.flush();
+    }
   });
   return operations;
 }
@@ -1961,6 +2172,7 @@ const controller = createSessionController({ call, store, onChange: () => { relo
     if (kind === 'save-failed') message(`שמירת הטיוטה בתוסף נכשלה (${error.message}). הטיוטה נשארה באוצריא ותישמר שוב בהמשך.`, true);
     if (kind === 'pending-save') message('אוצריא עדיין שומרת את הטיוטה. היא תיקלט בתוסף בפתיחה הבאה או ברענון.');
   } });
+const readerReplacement = createReaderReplacement({ call, controller, loader: replacementBooks, confirm, notify });
 // Coalesced, but a request during a read always causes a fresh read after it.
 let reloading = null, reloadAgain = false;
 async function reload() {
@@ -1972,6 +2184,7 @@ async function reload() {
         state = await store.load();
         legacy = await readLegacyDrafts(call);
         legacyHistory = await readLegacyHistory(call).catch(() => []);
+        legacySignature = JSON.stringify([legacy, legacyHistory]);
       } while (reloadAgain);
     } finally { reloading = null; }
     scheduleRender();
@@ -2394,10 +2607,33 @@ function renderSettings() {
   el('marks-toggle').disabled = busy || !highlightGranted;
   el('marks-permission').hidden = highlightGranted;
 }
+function renderGroup(name, signature, action) {
+  let cached = renderedGroups.get(name);
+  if (cached?.signature !== signature) {
+    const actions = [], previous = buildingActions;
+    buildingActions = actions;
+    try { action(); } finally { buildingActions = previous; }
+    cached = { signature, actions }; renderedGroups.set(name, cached);
+  }
+}
+function renderControls() {
+  for (const cached of renderedGroups.values()) {
+    for (const { item, disabled } of cached.actions) item.disabled = disabled || busy;
+  }
+  renderSettings(); renderReport(); renderReplace();
+  el('refresh').disabled = busy;
+}
 function render() {
   const focused = document.activeElement?.dataset?.focusKey;
-  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport(); renderReplace();
-  el('refresh').disabled = busy;
+  const liveKey = JSON.stringify([[...controller.sessions.values()].map(item => [item.ended, item.saved, item.reason, item.error,
+    item.snapshot.sessionId, item.snapshot.revision, item.snapshot.draft?.version, item.snapshot.draft?.persisted,
+    item.snapshot.draft?.displaced, item.snapshot.draft?.error, item.snapshot.changes.length]),
+    [...controller.activeElsewhere.values()], openTabs]);
+  renderGroup('live', liveKey, renderLive);
+  renderGroup('books', `${state.fingerprint ?? ''}:${liveKey}`, renderBooks);
+  renderGroup('legacy', `${state.fingerprint ?? ''}:${liveKey}:${legacySignature}`, renderLegacy);
+  renderGroup('history', `${state.historyFingerprint ?? ''}:${legacySignature}`, renderHistory);
+  renderControls();
   if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
 async function initialize(boot) {
@@ -2464,7 +2700,7 @@ for (const id of ['replace-session', 'replace-whole-words']) el(id).addEventList
 el('replace-preview').addEventListener('click', () => { afterBoot(() => run(previewReplacement)).catch(error => notify(errorText(error), true)); });
 el('replace-apply').addEventListener('click', () => { afterBoot(() => run(applyReplacement)).catch(error => notify(errorText(error), true)); });
 el('replace-back').addEventListener('click', () => showScreen('work', true));
-el('refresh').addEventListener('click', () => run(async () => { await refreshTabs(); await controller.recoverOrphans(); }));
+el('refresh').addEventListener('click', () => { afterBoot(() => run(async () => { await refreshTabs(); await controller.recoverOrphans(); })).catch(error => notify(errorText(error), true)); });
 el('embedded-native').addEventListener('click', () => run(async () => {
   await call('reader.setDefaultTextReader', { enabled: false }).catch(() => {});
   if (embedded) await call('reader.openBook', { bookId: embedded.bookId, ...(embedded.id != null ? { id: embedded.id } : {}), index: embedded.currentIndex ?? 0, reader: 'native' });
@@ -2482,6 +2718,9 @@ if (host) {
   onHost('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
   onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); });
   onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); });
+  onHost('search.fieldAction.invoked', event => { afterBoot(() => run(() => readerReplacement.invoked(event))).catch(error => notify(errorText(error), true)); });
+  onHost('search.fieldAction.stopRequested', event => { afterBoot(() => readerReplacement.stop(event)).catch(error => notify(errorText(error), true)); });
+  onHost('search.fieldAction.ended', event => readerReplacement.ended(event));
   onHost('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => { diagnostics.error('initialize.error', error); message(errorText(error), true); }); });
   if (host._booted) { initialized ??= initialize(); startInitialization(); initialized.catch(error => message(errorText(error), true)); }
 } else message('יש לפתוח את התוסף מתוך אוצריא.');

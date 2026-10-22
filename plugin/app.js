@@ -7,9 +7,10 @@ import { loadBook, sourceText } from './book.js';
 import { mergeProposals } from './text-diff.js';
 import { createReaderMarks, marksEnabled, MARK_SETTING_KEY } from './reader-marks.js';
 import { appendFormattedDiff } from './book-format.js';
-import { planReplacements } from './find-replace.js';
+import { planReplacements, createReplacementBookLoader } from './find-replace.js';
 import { createSendVisibility } from './send-visibility.js';
 import { createDiagnostics } from './diagnostics.js';
+import { createReaderReplacement } from './reader-replace.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 let diagnostics;
 const rawCall = host ? createRpcCall(host, { onRetry: data => diagnostics?.record('rpc.retry', data) }) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
@@ -24,9 +25,12 @@ let background = false;
 const mainScreens = ['work', 'history', 'settings'];
 let currentScreen = 'work', lastMainScreen = 'work', reporterHasEmail = null;
 const screenScroll = new Map();
+const renderedGroups = new Map();
+let buildingActions = null, legacySignature = '', replaceOptions = '', renderedReplacePlan;
 // Pending proposals are marked green in the reader (a setting, on by default).
 const marks = createReaderMarks(call);
 const sendVisibility = createSendVisibility(call);
+const replacementBooks = createReplacementBookLoader(call);
 let replacePlan = null, replaceNotice = '';
 let marksOn = true, highlightGranted = true, refCheck = 0;
 const reasons = {
@@ -79,6 +83,7 @@ function button(label, action, { ghost = true, key, disabled = false, describe, 
   if (key) item.dataset.focusKey = key;
   if (describe) item.setAttribute('aria-label', describe);
   item.disabled = disabled || busy;
+  buildingActions?.push({ item, disabled });
   item.addEventListener('click', () => { diagnostics.record('ui.action', { name: key?.split(':')[0] ?? action.name }); return local ? action() : run(action); });
   return item;
 }
@@ -142,9 +147,10 @@ function openReplace(sessionId) {
 function renderReplace() {
   const select = el('replace-session'), selected = select.value;
   const active = [...controller.sessions.values()].filter(item => !item.ended);
-  select.replaceChildren(...active.map(item => {
+  const optionsKey = JSON.stringify(active.map(item => [item.snapshot.sessionId, item.snapshot.bookId]));
+  if (replaceOptions !== optionsKey) { select.replaceChildren(...active.map(item => {
     const option = node('option', '', item.snapshot.bookId); option.value = item.snapshot.sessionId; return option;
-  }));
+  })); replaceOptions = optionsKey; }
   select.value = active.some(item => item.snapshot.sessionId === selected) ? selected : active[0]?.snapshot.sessionId ?? '';
   if (replacePlan && (replacePlan.sessionId !== select.value || controller.sessions.get(select.value)?.snapshot.revision !== replacePlan.revision)) {
     replacePlan = null; replaceNotice = 'הנוסח בקורא השתנה. הציגו התאמות מחדש לפני החלפה.';
@@ -154,20 +160,27 @@ function renderReplace() {
   el('replace-apply').disabled = busy || !replacePlan?.occurrences;
   el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.` :
     replaceNotice || (active.length ? 'הציגו התאמות כדי לבדוק את הנוסח לפני ההחלפה.' : 'התחילו קודם עריכה של ספר בקורא כדי לחפש ולהחליף בו.');
-  el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
-  if (replacePlan?.previews.length > 20) el('replace-results').append(node('p', 'hint', 'מוצגות 20 הפסקאות הראשונות. ההחלפה תחול על כל ההתאמות שנספרו בספר.'));
+  if (renderedReplacePlan !== replacePlan) {
+    el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
+    if (replacePlan?.previews.length > 20) el('replace-results').append(node('p', 'hint', 'מוצגות 20 הפסקאות הראשונות. ההחלפה תחול על כל ההתאמות שנספרו בספר.'));
+    renderedReplacePlan = replacePlan;
+  }
 }
 async function previewReplacement() {
   replacePlan = null; replaceNotice = '';
   const sessionId = el('replace-session').value, live = controller.sessions.get(sessionId);
   if (!live || live.ended) throw new Error('התחילו עריכה של הספר בקורא לפני חיפוש והחלפה.');
-  const { bookId, bookUid } = live.snapshot;
-  const book = await loadBook(call, { bookId, bookUid }, progress => {
+  diagnostics.record('replacement.load.start');
+  const began = Date.now();
+  const book = await replacementBooks.load(live.snapshot, progress => {
     if (progress.phase === 'content') message(`טוען את נוסח הספר לחיפוש… ${progress.loaded.toLocaleString('he-IL')} תווים`);
-  }, { includeRaw: true });
+  });
+  diagnostics.record('replacement.load.ok', { durationMs: Date.now() - began, count: book.sections.length });
   const snapshot = await controller.inspect(sessionId);
-  replacePlan = planReplacements(book, snapshot, { query: String(el('replace-query').value ?? ''),
-    replacement: String(el('replace-with').value ?? ''), wholeWords: el('replace-whole-words').checked });
+  try {
+    replacePlan = planReplacements(book, snapshot, { query: String(el('replace-query').value ?? ''),
+      replacement: String(el('replace-with').value ?? ''), wholeWords: el('replace-whole-words').checked });
+  } catch (error) { replacementBooks.clear(); throw error; }
   message(replacePlan.occurrences ? 'התצוגה המקדימה מוכנה. בדקו אותה לפני החלפה.' : 'לא נמצאו התאמות לחיפוש בנוסח הנוכחי.');
 }
 async function applyReplacement() {
@@ -175,7 +188,9 @@ async function applyReplacement() {
   if (!plan?.occurrences) throw new Error('הציגו התאמות לפני החלפה.');
   if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.`)) return;
   replacePlan = null;
-  const result = await controller.applyReplacements(plan);
+  let result;
+  try { result = await controller.applyReplacements(plan); }
+  catch (error) { replacementBooks.clear(); throw error; }
   replaceNotice = 'ההחלפה הוחלה. אפשר לבצע חיפוש נוסף בנוסח המעודכן.';
   message(result.saved ? `${plan.occurrences} החלפות הוחלו בקורא ונשמרו בתוסף. לא נשלחו דיווחים.` :
     `${plan.occurrences} החלפות הוחלו בקורא וממתינות לשמירת הטיוטה באוצריא. לא נשלחו דיווחים.`);
@@ -190,7 +205,10 @@ function run(action) {
     diagnostics.record('operation.start', { name: action.name || 'anonymous' });
     try { await action(); diagnostics.record('operation.ok', { durationMs: Date.now() - began }); }
     catch (error) { diagnostics.error('operation.error', error); notify(errorText(error), true); }
-    finally { busy = false; await reload().catch(error => { diagnostics.error('reload.error', error); message(error.message, true); }); diagnostics.flush(); }
+    finally {
+      await reload().catch(error => { diagnostics.error('reload.error', error); message(error.message, true); });
+      busy = false; render(); diagnostics.flush();
+    }
   });
   return operations;
 }
@@ -203,6 +221,7 @@ const controller = createSessionController({ call, store, onChange: () => { relo
     if (kind === 'save-failed') message(`שמירת הטיוטה בתוסף נכשלה (${error.message}). הטיוטה נשארה באוצריא ותישמר שוב בהמשך.`, true);
     if (kind === 'pending-save') message('אוצריא עדיין שומרת את הטיוטה. היא תיקלט בתוסף בפתיחה הבאה או ברענון.');
   } });
+const readerReplacement = createReaderReplacement({ call, controller, loader: replacementBooks, confirm, notify });
 // Coalesced, but a request during a read always causes a fresh read after it.
 let reloading = null, reloadAgain = false;
 async function reload() {
@@ -214,6 +233,7 @@ async function reload() {
         state = await store.load();
         legacy = await readLegacyDrafts(call);
         legacyHistory = await readLegacyHistory(call).catch(() => []);
+        legacySignature = JSON.stringify([legacy, legacyHistory]);
       } while (reloadAgain);
     } finally { reloading = null; }
     scheduleRender();
@@ -636,10 +656,33 @@ function renderSettings() {
   el('marks-toggle').disabled = busy || !highlightGranted;
   el('marks-permission').hidden = highlightGranted;
 }
+function renderGroup(name, signature, action) {
+  let cached = renderedGroups.get(name);
+  if (cached?.signature !== signature) {
+    const actions = [], previous = buildingActions;
+    buildingActions = actions;
+    try { action(); } finally { buildingActions = previous; }
+    cached = { signature, actions }; renderedGroups.set(name, cached);
+  }
+}
+function renderControls() {
+  for (const cached of renderedGroups.values()) {
+    for (const { item, disabled } of cached.actions) item.disabled = disabled || busy;
+  }
+  renderSettings(); renderReport(); renderReplace();
+  el('refresh').disabled = busy;
+}
 function render() {
   const focused = document.activeElement?.dataset?.focusKey;
-  renderLive(); renderBooks(); renderLegacy(); renderHistory(); renderSettings(); renderReport(); renderReplace();
-  el('refresh').disabled = busy;
+  const liveKey = JSON.stringify([[...controller.sessions.values()].map(item => [item.ended, item.saved, item.reason, item.error,
+    item.snapshot.sessionId, item.snapshot.revision, item.snapshot.draft?.version, item.snapshot.draft?.persisted,
+    item.snapshot.draft?.displaced, item.snapshot.draft?.error, item.snapshot.changes.length]),
+    [...controller.activeElsewhere.values()], openTabs]);
+  renderGroup('live', liveKey, renderLive);
+  renderGroup('books', `${state.fingerprint ?? ''}:${liveKey}`, renderBooks);
+  renderGroup('legacy', `${state.fingerprint ?? ''}:${liveKey}:${legacySignature}`, renderLegacy);
+  renderGroup('history', `${state.historyFingerprint ?? ''}:${legacySignature}`, renderHistory);
+  renderControls();
   if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
 async function initialize(boot) {
@@ -706,7 +749,7 @@ for (const id of ['replace-session', 'replace-whole-words']) el(id).addEventList
 el('replace-preview').addEventListener('click', () => { afterBoot(() => run(previewReplacement)).catch(error => notify(errorText(error), true)); });
 el('replace-apply').addEventListener('click', () => { afterBoot(() => run(applyReplacement)).catch(error => notify(errorText(error), true)); });
 el('replace-back').addEventListener('click', () => showScreen('work', true));
-el('refresh').addEventListener('click', () => run(async () => { await refreshTabs(); await controller.recoverOrphans(); }));
+el('refresh').addEventListener('click', () => { afterBoot(() => run(async () => { await refreshTabs(); await controller.recoverOrphans(); })).catch(error => notify(errorText(error), true)); });
 el('embedded-native').addEventListener('click', () => run(async () => {
   await call('reader.setDefaultTextReader', { enabled: false }).catch(() => {});
   if (embedded) await call('reader.openBook', { bookId: embedded.bookId, ...(embedded.id != null ? { id: embedded.id } : {}), index: embedded.currentIndex ?? 0, reader: 'native' });
@@ -724,6 +767,9 @@ if (host) {
   onHost('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
   onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); });
   onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); });
+  onHost('search.fieldAction.invoked', event => { afterBoot(() => run(() => readerReplacement.invoked(event))).catch(error => notify(errorText(error), true)); });
+  onHost('search.fieldAction.stopRequested', event => { afterBoot(() => readerReplacement.stop(event)).catch(error => notify(errorText(error), true)); });
+  onHost('search.fieldAction.ended', event => readerReplacement.ended(event));
   onHost('plugin.boot', boot => { initialized ??= initialize(boot); startInitialization(); initialized.catch(error => { diagnostics.error('initialize.error', error); message(errorText(error), true); }); });
   if (host._booted) { initialized ??= initialize(); startInitialization(); initialized.catch(error => message(errorText(error), true)); }
 } else message('יש לפתוח את התוסף מתוך אוצריא.');

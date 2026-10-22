@@ -1,3 +1,25 @@
+import { loadBook } from './book.js';
+
+// Keep only one active session's source, in memory. Every application still
+// validates all source paragraphs in Otzaria; cache never authorizes a write.
+export function createReplacementBookLoader(call) {
+  let cached = null;
+  return {
+    clear() { cached = null; },
+    async load(snapshot, onProgress) {
+      if (!snapshot?.sessionId || !snapshot.bookUid || !snapshot.libraryVersion) {
+        throw new Error('נדרש סשן עריכה פעיל ומזוהה כדי לטעון את הספר להחלפה.');
+      }
+      const key = JSON.stringify([snapshot.sessionId, snapshot.bookUid, snapshot.libraryVersion]);
+      if (cached?.key === key) return cached.promise;
+      const entry = { key, promise: loadBook(call, { bookId: snapshot.bookId, bookUid: snapshot.bookUid }, onProgress,
+        { includeRaw: true, deferSourceValidation: true }) };
+      cached = entry;
+      try { return await entry.promise; }
+      catch (error) { if (cached === entry) cached = null; throw error; }
+    }
+  };
+}
 const replaceWordCharacter = /[\p{L}\p{N}\p{M}_]/u;
 const replaceUnsupportedText = /[<>\r\n\u2028\u2029]|&(?:#[xX]?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/;
 function replacementFailure(message, code = 'invalid_params') {

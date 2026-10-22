@@ -111,10 +111,20 @@ const extra = {
   'fs.readFile': ({ path }) => ({ content: logFiles.get(path) }),
   'fs.listDir': () => ({ entries: [...logFiles].map(([path, content]) => ({ path, type: 'file', size: content.length, modified: new Date().toISOString() })) }),
   'fs.deleteEntry': ({ path }) => logFiles.delete(path),
-  'reader.getCurrentState': () => ({ currentTabId: null, openTabs: [...host.tabs].map(([tabId, bookUid]) => ({ tabId, bookUid, id: 1, bookId: 'ספר הבדיקה', book: 'ספר הבדיקה', type: 'text',
+  'reader.getCurrentState': () => ({ currentTabId: window.readerFieldActive ? tab : null, bookUid: 'id:1', currentType: 'text', currentBookId: 'ספר הבדיקה',
+    currentCorrectionSessionId: [...host.sessions.values()].find(s => !s.ended && s.tabId === tab)?.sessionId ?? null,
+    openTabs: [...host.tabs].map(([tabId, bookUid]) => ({ tabId, bookUid, id: 1, bookId: 'ספר הבדיקה', book: 'ספר הבדיקה', type: 'text',
     correctionSessionId: [...host.sessions.values()].find(s => !s.ended && s.tabId === tabId)?.sessionId ?? null })) }),
   'reader.activateTab': ({ index }) => { window.activated = index; return true; },
+  'library.getBookDetails': ({ bookUid }) => ({ source: 'library', type: 'text', bookUid, lineCount: host.books[bookUid].lines.length }),
+  'library.getBookContent': ({ bookUid, offset, limit }) => host.books[bookUid].lines.join(String.fromCharCode(10)).slice(offset, offset + limit),
+  // Native reader maps can see empty placeholders outside the loaded range.
+  'reader.getSectionTextMap': () => ({ sourceText: '' }),
   'ui.showConfirm': () => ({ confirmed: true }),
+  'ui.showMessage': () => true,
+  'ui.showError': () => true,
+  'search.setFieldActionState': args => { (window.fieldStates ??= []).push(args); return true; },
+  'search.endFieldSession': ({ sessionId }) => { queueMicrotask(() => mockHandlers['search.fieldAction.ended']({ sessionId, reason: 'plugin' })); return true; },
   'app.getGrantedPermissions': () => ['reader.local_edit', 'reader.highlight'],
   'reader.findTextOccurrences': ({ bookUid, sectionIndex, query }) => {
     const text = host.books[bookUid].lines[sectionIndex].replace(/<[^>]*>/g, ''), results = [];
@@ -354,6 +364,11 @@ async function openWith(entries, reload) {
 }
 const kept = await openWith([...seed.data], false);
 await openWith(kept, true);
+await waitFor("!document.getElementById('refresh').disabled", 'home idle');
+await evaluate("window.homeCard = document.querySelector('#book-list .card'); window.historyCard = document.querySelector('#history-list .card')");
+await click('#refresh');
+assert.equal(await evaluate("window.homeCard === document.querySelector('#book-list .card') && window.historyCard === document.querySelector('#history-list .card')"), true, 'busy state preserves unchanged home and history DOM');
+await waitFor("!document.getElementById('refresh').disabled", 'home refresh released');
 await waitFor("document.querySelector('[data-focus-key^=\"merge:\"]') && !document.querySelector('[data-focus-key^=\"merge:\"]').disabled", 'offline merge enabled');
 await theme('light');
 await click('[data-focus-key^="merge:"]');
@@ -369,6 +384,37 @@ assert.equal(await evaluate("[...storage.data.keys()].filter(k => k.startsWith('
 assert.equal(await evaluate("[...storage.data.values()].filter(v => v?.replacedKeys).every(v => v.changes[0].proposedText === 'אלף ביתא גימל דלת!')"), true, 'combined wording stored');
 assert.equal(await evaluate("document.getElementById('book-list').textContent.includes('ביתא') && document.getElementById('book-list').textContent.includes('!')"), true, 'both edits displayed in diff');
 await capture('plugin-offline-merge-dark');
+await waitFor("document.querySelector('[data-focus-key^=\"begin:\"]') && !document.querySelector('[data-focus-key^=\"begin:\"]').disabled", 'reader edit available');
+await click('[data-focus-key^="begin:"]');
+await waitFor("document.querySelector('[data-focus-key^=\"replace:\"]') && !document.querySelector('[data-focus-key^=\"replace:\"]').disabled", 'active-session replacement button');
+await evaluate("host.edit([...host.sessions.values()].find(s => !s.ended).sessionId, 0, 'פסקה 1 בספר הבדיקה — תיקון קודם'); mockHandlers['reader.correctionSessionChanged']({ sessionId: [...host.sessions.values()].find(s => !s.ended).sessionId })");
+await click('[data-focus-key^="replace:"]');
+await waitFor("document.activeElement.id === 'replace-query' && !document.getElementById('replace-query').disabled", 'replacement input focused');
+await call('Input.insertText', { text: 'בספר הבדיקה' });
+await click('#replace-with'); await call('Input.insertText', { text: 'בספר המתוקן' });
+await click('#replace-preview');
+await waitFor("/39 התאמות/.test(document.getElementById('replace-summary').textContent) && !document.getElementById('replace-apply').disabled", 'replacement preview despite unloaded reader maps');
+assert.equal(await evaluate("rpc.filter(r => r.method === 'reader.getSectionTextMap').length"), 0);
+const replacementReads = await evaluate("rpc.filter(r => r.method === 'library.getBookContent').length");
+await theme('light'); await capture('plugin-replace-light'); await theme('dark'); await capture('plugin-replace-dark');
+await click('#replace-preview');
+await waitFor("!document.getElementById('replace-apply').disabled", 'second preview ready');
+assert.equal(await evaluate("rpc.filter(r => r.method === 'library.getBookContent').length"), replacementReads, 'repeated preview reuses source');
+await click('#replace-apply');
+await waitFor("/39 החלפות הוחלו/.test(document.getElementById('status').textContent) && !document.getElementById('replace-query').disabled", 'bulk replacement applied');
+assert.equal(await evaluate("[...host.sessions.values()].find(s => !s.ended).changes.length"), 39);
+assert.equal(await evaluate("[...host.sessions.values()].find(s => !s.ended).changes.find(c => c.sectionIndex === 0).proposedText.endsWith('תיקון קודם')"), true, 'existing wording retained');
+assert.equal(await evaluate('host.submissions.size'), 0, 'replacement sends no reports');
+await click('#replace-back');
+// The host field itself is Flutter. This exercises its real event contract
+// through the browser SDK fixture; native registration/taps are tested in Dart.
+await waitFor("!document.getElementById('refresh').disabled", 'ready for native field actions');
+await evaluate("window.readerFieldActive = true; mockHandlers['search.fieldAction.invoked']({ actionId: 'replace-in-book', field: 'inBook', sessionId: 'field-first', text: 'פסקה 3', selectionStart: 6, selectionEnd: 6 })");
+await waitFor("/נשמר החיפוש המדויק/.test(document.getElementById('status').textContent) && !document.getElementById('refresh').disabled", 'first search-field click remembers exact query');
+await evaluate("mockHandlers['search.fieldAction.ended']({ sessionId: 'field-first', reason: 'edited' }); mockHandlers['search.fieldAction.invoked']({ actionId: 'replace-in-book', field: 'inBook', sessionId: 'field-second', text: 'פסקה שלישית', selectionStart: 12, selectionEnd: 12 })");
+await waitFor("/1 החלפות הוחלו בקורא/.test(document.getElementById('status').textContent) && !document.getElementById('refresh').disabled", 'second search-field click applies confirmed alternative');
+assert.equal(await evaluate("[...host.sessions.values()].find(s => !s.ended).changes.find(c => c.sectionIndex === 2).proposedText.startsWith('פסקה שלישית')"), true);
+assert.equal(await evaluate('host.submissions.size'), 0, 'native field workflow sends no reports');
 await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
 await evaluate("document.getElementById('panel').scrollTop = 0");
 assert.equal(await evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'no horizontal overflow on a narrow page');

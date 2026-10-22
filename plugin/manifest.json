@@ -19,6 +19,8 @@
     "reader.toolbar",
     "reader.local_edit",
     "reader.highlight",
+    "search.field_actions",
+    "ui.feedback",
     "library.books.read",
     "library.content.read",
     "feedback.send_email",
@@ -31,6 +33,15 @@
       "defaultPinned": false
     },
     "startup": {
+      "searchFieldActions": [
+        {
+          "id": "replace-in-book",
+          "title": "החלפה מדויקת: זכירת חיפוש / אישור חלופה",
+          "icon": "document_edit_24_regular",
+          "activeIcon": "dismiss_24_regular",
+          "fields": ["inBook"]
+        }
+      ],
       "toolbarItems": [
         {
           "id": "send-book-corrections",

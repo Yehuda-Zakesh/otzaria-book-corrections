@@ -57,9 +57,10 @@ export function markTargets(state) {
   return targets.slice(0, markLimit);
 }
 
-export function createReaderMarks(call) {
+export function createReaderMarks(call, { now = () => Date.now(), retryDelay = 5000 } = {}) {
   const drawn = new Map();
-  let running = Promise.resolve(), wake = null, revision = null;
+  const misses = new Map();
+  let running = null, pending = null, wake = null, revision = null;
   async function draw(target) {
     const found = await call('reader.findTextOccurrences', { bookId: target.bookId, bookUid: target.bookUid, sectionIndex: target.sectionIndex,
       query: target.text, layer: 'source', limit: 200 });
@@ -76,38 +77,56 @@ export function createReaderMarks(call) {
     await call('storage.set', { key: MARK_WAKE_KEY, value });
     wake = value;
   }
-  // Brings the reader's marks in line with the pending proposals. Failures of
-  // one mark do not stop the others; the next sync tries again.
+  async function drawState(state, enabled) {
+    const targets = enabled ? markTargets(state) : [];
+    const wanted = new Map(targets.map(target => [target.id, target]));
+    for (const id of misses.keys()) if (!wanted.has(id)) misses.delete(id);
+    let failed = 0;
+    for (const [id, signature] of drawn) {
+      const target = wanted.get(id);
+      if (target && signature === signatureOf(target)) continue;
+      await call('reader.clearHighlight', { highlightId: id }).catch(() => {});
+      drawn.delete(id);
+    }
+    for (const target of targets) {
+      if (drawn.has(target.id)) continue;
+      const signature = signatureOf(target), miss = misses.get(target.id);
+      if (miss?.signature === signature && miss.retryAt > now()) continue;
+      try {
+        if (await draw(target)) { drawn.set(target.id, signature); misses.delete(target.id); }
+        else misses.set(target.id, { signature, retryAt: now() + retryDelay });
+      } catch { failed++; misses.set(target.id, { signature, retryAt: now() + retryDelay }); }
+    }
+    await setWake(enabled && targets.length > 0).catch(() => {});
+    const next = revisionOf(targets, enabled);
+    if (next !== revision) { await call('storage.set', { key: MARK_REVISION_KEY, value: next }).catch(() => {}); revision = next; }
+    return { drawn: drawn.size, wanted: targets.length, failed };
+  }
+  // Keep one current draw and one latest requested state. Intermediate
+  // reloads must not accumulate hundreds of obsolete reader lookups.
   function sync(state, enabled) {
-    running = running.catch(() => {}).then(async () => {
-      const targets = enabled ? markTargets(state) : [];
-      const wanted = new Map(targets.map(target => [target.id, target]));
-      let failed = 0;
-      for (const [id, signature] of drawn) {
-        const target = wanted.get(id);
-        if (target && signature === signatureOf(target)) continue;
-        await call('reader.clearHighlight', { highlightId: id }).catch(() => {});
-        drawn.delete(id);
-      }
-      for (const target of targets) {
-        if (drawn.has(target.id)) continue;
-        try { if (await draw(target)) drawn.set(target.id, signatureOf(target)); }
-        catch { failed++; }
-      }
-      await setWake(enabled && targets.length > 0).catch(() => {});
-      const next = revisionOf(targets, enabled);
-      if (next !== revision) { await call('storage.set', { key: MARK_REVISION_KEY, value: next }).catch(() => {}); revision = next; }
-      return { drawn: drawn.size, wanted: targets.length, failed };
+    pending = { state, enabled };
+    if (running) return running;
+    running = Promise.resolve().then(async () => {
+      let result;
+      try {
+        while (pending) {
+          const next = pending; pending = null;
+          result = await drawState(next.state, next.enabled);
+        }
+        return result;
+      } finally { running = null; }
     });
     return running;
   }
   // True when another instance synced a different set of marks.
   async function outdated() {
+    if ([...misses.values()].some(miss => miss.retryAt <= now())) return true;
     if (revision === null) return false;
     return (await call('storage.get', { key: MARK_REVISION_KEY }).catch(() => revision)) !== revision;
   }
   async function clearAll() {
-    drawn.clear();
+    drawn.clear(); misses.clear();
     await call('reader.clearAllHighlights', {}).catch(() => {});
   }
   return { sync, outdated, clearAll, drawn };

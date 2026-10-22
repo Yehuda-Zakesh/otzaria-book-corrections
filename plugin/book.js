@@ -55,7 +55,8 @@ function bytes(text) { return new TextEncoder().encode(text).length; }
  * Returned offsets are UTF-16 offsets into originalText, end exclusive.
  * Do not derive later section indexes from edited text; retain these anchors.
  */
-export async function loadBook(call, identity, onProgress = () => {}, { signal, includeRaw = false } = {}) {
+export async function loadBook(call, identity, onProgress = () => {}, { signal, includeRaw = false, deferSourceValidation = false } = {}) {
+  if (deferSourceValidation && !includeRaw) throw new Error('Deferred validation requires raw source.');
   if (typeof identity?.bookId !== 'string' || !identity.bookId) throw new Error('חסר זיהוי של הספר.');
   const details = await request(call, 'library.getBookDetails', identity, signal);
   if (details?.source !== 'library' || details?.type !== 'text') throw new Error('אפשר לערוך ספרי טקסט מספריית אוצריא בלבד.');
@@ -95,7 +96,14 @@ export async function loadBook(call, identity, onProgress = () => {}, { signal, 
   // A DB section may contain an embedded newline. A matching count plus source
   // checks guards the fast path; mismatches use authoritative section maps.
   let trusted = lines.length === count;
-  if (trusted) {
+  // Correction restore validates every changed raw paragraph against the DB,
+  // atomically, including library version and revision. Reader source maps
+  // can refer to empty placeholders in a lazily loaded tab. They cannot be
+  // used to validate whole-book replacement previews in that session.
+  if (deferSourceValidation && !trusted) {
+    throw new Error('גבולות הפסקאות בתוכן הספר אינם תואמים למספר הפסקאות. אי אפשר להכין החלפה בטוחה; לא נעשה שינוי.');
+  }
+  if (trusted && !deferSourceValidation) {
     for (const index of new Set([0, count - 1])) {
       const map = await mapFor(index);
       if (map?.sourceText !== lines[index]) { trusted = false; break; }

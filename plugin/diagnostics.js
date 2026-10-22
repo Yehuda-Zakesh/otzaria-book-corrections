@@ -29,7 +29,12 @@ export function createDiagnostics(rawCall, { now = () => Date.now(),
   }
   function add(event, data, persist = true) {
     entries.push({ at: now(), event: token(event) ?? 'unknown', ...clean(data) });
-    if (entries.length > maxEntries) entries.splice(0, entries.length - maxEntries);
+    while (entries.length > maxEntries) {
+      const isError = e => /error|failed/.test(e.event);
+      const keepErrors = entries.filter(isError).length <= Math.min(20, maxEntries);
+      const discard = keepErrors ? entries.findIndex(e => !isError(e)) : 0;
+      entries.splice(discard < 0 ? 0 : discard, 1);
+    }
     if (persist && started && timer === null) timer = schedule(() => { timer = null; api.flush(); }, 800);
   }
   function summary(value) {
@@ -95,11 +100,14 @@ export function createDiagnostics(rawCall, { now = () => Date.now(),
         const safeMethod = token(method) ?? 'unknown';
         const counterKey = counters.has(safeMethod) || counters.size < 100 ? safeMethod : 'other';
         counters.set(counterKey, (counters.get(counterKey) ?? 0) + 1);
-        add('rpc.start', { method: safeMethod, request, book: reference(args?.bookUid), session: reference(args?.sessionId),
+        // Frequent state reloads must not erase the failure being diagnosed.
+        // Counts still include successful storage reads; their errors remain detailed.
+        const quiet = method === 'storage.get' || method === 'storage.list';
+        if (!quiet) add('rpc.start', { method: safeMethod, request, book: reference(args?.bookUid), session: reference(args?.sessionId),
           sectionIndex: args?.sectionIndex, offset: args?.offset, length: args?.length });
         try {
           const result = await invoke(method, args, options);
-          add('rpc.ok', { method: safeMethod, request, durationMs: now() - at, ...summary(result) });
+          if (!quiet) add('rpc.ok', { method: safeMethod, request, durationMs: now() - at, ...summary(result) });
           return result;
         } catch (error) {
           add('rpc.error', { method: safeMethod, request, durationMs: now() - at, code: token(error?.code) ?? 'unknown', name: token(error?.name) ?? 'Error', frame: frame(error) });
