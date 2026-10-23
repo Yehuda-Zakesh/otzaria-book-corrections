@@ -24,7 +24,7 @@ class Element {
   get allText() { return [...this.walk()].map(item => item.textContent).join(' '); }
 }
 const strip = line => line.replace(/<[^>]*>/g, '');
-async function plugin({ host, storage, confirm = true, boot = {}, permissions = ['reader.local_edit'] }) {
+async function plugin({ host, storage, confirm = true, boot = {}, permissions = ['reader.local_edit'], overrides = {} }) {
   const bundle = await build();
   const elements = new Map(), listeners = new Map();
   let booted = false;
@@ -52,13 +52,14 @@ async function plugin({ host, storage, confirm = true, boot = {}, permissions = 
     'app.getTheme': () => null,
     'library.getBookDetails': ({ bookUid }) => ({ source: 'library', type: 'text', id: Number(bookUid.slice(3)), title: host.books[bookUid].bookId, lineCount: host.books[bookUid].lines.length }),
     'library.getBookContent': ({ bookUid, offset, limit }) => host.books[bookUid].lines.join('\n').slice(offset, offset + limit),
-    'reader.getSectionTextMap': ({ bookUid, sectionIndex }) => ({ sourceText: strip(host.books[bookUid].lines[sectionIndex]) })
+    'reader.getSectionTextMap': ({ bookUid, sectionIndex }) => ({ sourceText: strip(host.books[bookUid].lines[sectionIndex]) }),
+    ...overrides
   };
   const sdk = {
     on(event, handler) { listeners.set(event, handler); },
     async call(method, args = {}) {
       if (!booted) return { success: false, error: { code: 'error.not_ready', message: 'SDK has not booted' } };
-      try { return { success: true, data: extra[method] ? extra[method](args) : await contract(method, args) }; }
+      try { return { success: true, data: extra[method] ? await extra[method](args) : await contract(method, args) }; }
       catch (error) { return { success: false, error: { code: error.code ?? 'error.internal', message: error.message } }; }
     }
   };
@@ -91,6 +92,18 @@ async function editInReader(page, host, edits) {
   page.emit('reader.correctionSessionChanged', { sessionId: session.sessionId });
   return session;
 }
+
+test('page: controls stay disabled until initialization finishes, so an early click is not dropped later', async () => {
+  const host = createFakeOtzaria(), storage = createStorage();
+  let release, asked = false;
+  const held = new Promise(resolve => { release = resolve; });
+  const page = await plugin({ host, storage, overrides: { 'reader.getCurrentState': async () => { asked = true; await held; return { currentTabId: null, openTabs: [] }; } } });
+  await waitFor(() => asked, 'initialization reads the open tabs');
+  await sleep(20);
+  assert.equal(page.el('refresh').disabled, true, 'refresh is disabled while the page is still loading');
+  release();
+  await waitFor(() => !page.el('refresh').disabled, 'refresh enabled after initialization');
+});
 
 test('page: an ID conflict asks for consent; refusal and reload keep asking; consent sends a new ID', async () => {
   const host = createFakeOtzaria(), storage = createStorage();

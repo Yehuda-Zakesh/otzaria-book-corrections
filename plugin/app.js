@@ -685,7 +685,13 @@ function render() {
   renderControls();
   if (focused) (document.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`) ?? el('refresh')).focus({ preventScroll: true });
 }
+// Actions wait for initialization (afterBoot), so the controls show it as busy:
+// otherwise a click queued behind it looks accepted and later finds them disabled.
 async function initialize(boot) {
+  busy = true;
+  try { await initializePage(boot); } finally { busy = false; render(); }
+}
+async function initializePage(boot) {
   background = boot?.app?.runMode === 'background';
   diagnostics.record('plugin.boot', { background, embedded: !!boot?.reader?.embedded });
   await diagnostics.start();
@@ -724,7 +730,7 @@ for (const [index, screen] of mainScreens.entries()) {
 }
 el('nav-report').addEventListener('click', () => {
   showScreen('report');
-  if (el('report-details').disabled) operations.then(() => { if (currentScreen === 'report') el('report-details').focus(); });
+  if (el('report-details').disabled) afterBoot(() => operations).then(() => { if (currentScreen === 'report') el('report-details').focus(); }).catch(() => {});
   else el('report-details').focus();
 });
 el('report-back').addEventListener('click', () => showScreen(lastMainScreen, true));

@@ -20,7 +20,6 @@
     "reader.local_edit",
     "reader.highlight",
     "search.field_actions",
-    "ui.feedback",
     "library.books.read",
     "library.content.read",
     "feedback.send_email",
