@@ -1918,7 +1918,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
     },
     async exportText() {
       await api.flush();
-      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.0', schema: 1,
+      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.1', schema: 1,
         persistenceFailed, filesAvailable, instances: await records() }, null, 2);
     },
     async files() {
@@ -1943,7 +1943,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
       await api.flush();
       const all = await records();
       const counts = [...counters].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([m, count]) => `${m}=${count}`).join(',');
-      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.0 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
+      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.1 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
       const recent = all.flatMap(r => r.entries.map(e => ({ ...e, instance: r.id }))).sort((a, b) => a.at - b.at);
       const errors = recent.filter(e => /error|failed/.test(e.event)).slice(-3);
       let output = details + header;

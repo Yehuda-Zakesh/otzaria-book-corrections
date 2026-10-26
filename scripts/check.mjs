@@ -7,8 +7,8 @@ const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 assert.equal(pkg.version, manifest.version, 'package and manifest versions must match');
 const committed = await readFile('plugin/app.bundle.js', 'utf8');
 assert.equal(await build(), committed, 'Run npm run build and commit the generated bundle');
-// The user's 0.9.98 host includes the correction session and draft APIs.
-assert.equal(manifest.minAppVersion, '0.9.98', 'the requested minimum host version is 0.9.98');
+// Otzaria 0.9.98.2 is the first release with the correction session, draft and search-field APIs.
+assert.equal(manifest.minAppVersion, '0.9.98.2', 'the minimum host version is Otzaria 0.9.98.2');
 for (const method of ['reader.beginCorrectionSession', 'reader.getCorrectionSession', 'reader.endCorrectionSession',
   'reader.acknowledgeCorrectionDraft', 'reader.listCorrectionDrafts', 'reader.getCorrectionDraft', 'feedback.submitBookCorrection']) {
   assert.ok(committed.includes(`'${method}'`), `the native correction flow uses ${method}`);

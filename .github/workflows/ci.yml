@@ -68,8 +68,8 @@ jobs:
           path: plugin
           publish: 'false'
           fail-on-warnings: 'true'
-          app-version: '0.9.99'
-          spec-url: 'https://raw.githubusercontent.com/Otzaria/otzaria/858a0cd78e4b5d05288407c6c6694287ed55499b/docs/plugin-sdk/spec.json'
+          app-version: '0.9.98.2'
+          spec-url: 'https://raw.githubusercontent.com/Otzaria/otzaria/1b9f23664bd2f97423f0b788e203d558c2a208b9/docs/plugin-sdk/spec.json'
       - run: npm run pack
       - name: Read version
         id: version

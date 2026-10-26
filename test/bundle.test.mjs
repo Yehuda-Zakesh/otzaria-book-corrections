@@ -60,7 +60,7 @@ async function waitFor(predicate, label) {
   assert.fail('timed out: ' + label);
 }
 
-test('bundle policy: Otzaria 0.9.98 with correction APIs, no direct network path', async () => {
+test('bundle policy: Otzaria 0.9.98.2 with correction APIs, no direct network path', async () => {
   const bundle = await build();
   for (const method of ['reader.beginCorrectionSession', 'reader.acknowledgeCorrectionDraft', 'reader.listCorrectionDrafts',
     'reader.getCorrectionDraft', 'feedback.submitBookCorrection', 'requireTextCorrection']) assert.ok(bundle.includes(method), method);

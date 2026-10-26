@@ -1,5 +1,14 @@
 # QA
 
+## 26 באוקטובר 2026 — גרסה 0.3.1 לאוצריא 0.9.98.2, ללא רשת
+
+- `minAppVersion` עודכן ל־0.9.98.2 וגרסת התוסף ל־0.3.1. נבדק בתג `0.9.98.2+807` (`1b9f23664`) של אוצריא: במפרט `spec.json` כל מתודות הסשנים והטיוטות, `feedback.submitBookCorrection`, `search.setFieldActionState` ו־`search.endFieldSession` מוגדרות מ־0.9.98.1, ו־`_searchFieldActionsMinVersion` במאמת ההתקנה הוא 0.9.98.1. `appReleaseVersion` מתרגם את build ‏99802 ל־"0.9.98.2", ו־`compareCoreVersions` משווה ארבעה רכיבים.
+- רשת: המניפסט אינו מצהיר על `network` ואינו מבקש הרשאת `network.*`, ולכן `requiresNetwork` (`manifest.networkEnabled`) הוא false והכלי אינו נחסם במצב לא מקוון. נוספה לכך בדיקה ב־`test/review/minimum-installation-qa.test.mjs`. ב־README נוסח ההסבר בהתאם.
+- CI ופרסום מאמתים מעכשיו עם `app-version: 0.9.98.2` ומול `spec.json` של תג השחרור.
+- המאמת `otzaria-plugin-validator` 1.19.1 הורץ מקומית מול מפרט התג עם `--app-version 0.9.98.2 --fail-on-warnings`: 0 שגיאות, 0 אזהרות, 3 הערות עיצוב שהיו קיימות קודם.
+- `npm run build` ואחריו `npm run qa` עברו: check, ‏199/199 בדיקות Node ללא כישלון או דילוג, דפדפן (בהיר וכהה, גלילה, מיקוד) עם `exceptions: 0` ואריזה ל־`dist/book-corrections-0.3.1.otzplugin`, שהמניפסט שבה מצהיר על 0.3.1 ועל 0.9.98.2. `git diff --check` עבר.
+- לא נבדק: התקנה והרצה באוצריא 0.9.98.2 חיה, ומבחן ה־Dart של המאמת המורחב לא הורץ מול התג.
+
 ## 23 באוקטובר 2026 — תיקון CI אדום ובדיקת דפדפן לא יציבה
 
 - **CI:** שלב „Otzaria validation and package” נכשל כבר מ-`80b95a5` על אזהרה (`fail-on-warnings`): `ui.feedback` ניתנת אוטומטית לכל תוסף. באוצריא היא חלק מ-`pluginBaselinePermissions` מאז 0.9.97, והמינימום של התוסף הוא 0.9.98. התוסף משתמש רק ב-`ui.show*` ולא ב-`ui.pickFolder` (שהצהרת `ui.feedback` הישנה מכסה), ולכן ההרשאה הוסרה מהמניפסט. המאמת `otzaria-plugin-validator` הורץ מקומית באותו commit ובאותם קלטים כמו ב-CI: 0 שגיאות, 0 אזהרות, 3 הערות עיצוב (קיימות מקודם).
