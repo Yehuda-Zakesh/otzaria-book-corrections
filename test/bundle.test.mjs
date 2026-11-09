@@ -132,3 +132,15 @@ test('sending from the page uses requireTextCorrection and shows queued honestly
   assert.match(page.el('status').textContent, /בתור של אוצריא וטרם נשלחו לאתר/);
   await waitFor(() => /טרם נשלח לאתר/.test(page.el('history-list').allText), 'queued history');
 });
+
+test('regression: a context-menu click without selection.tabId resolves the tab of its book', async () => {
+  const page = await plugin();
+  await page.boot();
+  const only = page.host.openTab('id:1');
+  // Right-click in the reader names the book but carries no tabId.
+  await page.emit('contextMenu.itemClicked', { itemId: 'correct-book', context: 'reader-book',
+    selection: { bookUid: 'id:1', bookId: 'book-1', sectionIndex: 0 } });
+  await waitFor(() => page.host.sessions.size === 1, 'session begun without selection.tabId');
+  assert.equal([...page.host.sessions.values()][0].tabId, only);
+  assert.ok(!/לא זוהתה לשונית/.test(page.el('status').textContent));
+});

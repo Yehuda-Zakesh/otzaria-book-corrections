@@ -44,3 +44,9 @@ test('a mark covers whole words, and an insertion marks the neighbouring word', 
   assert.deepEqual(markSpan(text, 3, 4), { start: 4, end: 7 }, 'a removed space');
   assert.equal(markSpan('', 0, 0), null);
 });
+
+test('regression: two proposals making the identical edit merge instead of conflicting', async () => {
+  const { mergeProposals } = await import('../plugin/text-diff.js');
+  assert.equal(mergeProposals('אבג דהו זחט', ['אבג XX זחט', 'אבג XX זחט']), 'אבג XX זחט');
+  assert.equal(mergeProposals('אבג דהו זחט', ['אבג XX זחט', 'אבג XX זחט ק']) !== null, true);
+});

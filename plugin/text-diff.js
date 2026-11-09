@@ -61,7 +61,9 @@ export function diffHunks(before, after) {
  * Returns null when two proposals touch the same words (or insert at the
  * same point): the user must then decide, nothing is guessed. */
 export function mergeProposals(original, proposals) {
-  const hunks = proposals.flatMap(proposed => diffHunks(original, proposed)).sort((a, b) => a.start - b.start || a.end - b.end);
+  const all = proposals.flatMap(proposed => diffHunks(original, proposed)).sort((a, b) => a.start - b.start || a.end - b.end);
+  // Two proposals making the very same edit are not a conflict.
+  const hunks = all.filter((hunk, i) => !(i && all[i - 1].start === hunk.start && all[i - 1].end === hunk.end && all[i - 1].insert === hunk.insert));
   for (let i = 1; i < hunks.length; i++) {
     const previous = hunks[i - 1], hunk = hunks[i];
     if (hunk.start < previous.end || hunk.start === previous.start) return null;

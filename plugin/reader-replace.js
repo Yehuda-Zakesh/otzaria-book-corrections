@@ -64,7 +64,9 @@ export function createReaderReplacement({ call, controller, loader, confirm, not
         if (!plan.occurrences) { notify('לא נמצאו התאמות מדויקות להחלפה. לא נעשה שינוי.'); return; }
         if (!same(await context(), request)) throw new Error('הספר או הלשונית השתנו. לא נעשה שינוי.');
         check();
-        if (!await confirm('החלפת כל ההתאמות בספר', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש מדויק של מילים שלמות: ${plan.query.slice(0, 200)}\nהחלפה: ${event.text ? event.text.slice(0, 200) : '(מחיקה)'}\n\nהנוסח יעודכן בטיוטת הקורא בלבד. דיווחים לא יישלחו.`)) {
+        if (!await confirm('החלפת כל ההתאמות בספר', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש מדויק של מילים שלמות: ${plan.query.slice(0, 200)}\nהחלפה: ${event.text ? event.text.slice(0, 200) : '(מחיקה)'}\n\nהנוסח יעודכן בטיוטת הקורא בלבד. דיווחים לא יישלחו.${plan.skipped ? `
+
+${plan.skipped} התאמות בתוך מילים ארוכות יותר (למשל עם תחילית) לא יוחלפו.` : ''}`)) {
           notify('ההחלפה בוטלה. לא נעשה שינוי.'); return;
         }
         check();

@@ -22,13 +22,13 @@ async function fixture(lines = ['אב אב', 'שמור', 'אב']) {
 }
 
 test('QA replacement: Hebrew and astral word boundaries are Unicode aware', () => {
-  assert.deepEqual(replaceLiteral('אב אבות מאב אב.', 'אב', 'אם', true), { text: 'אם אבות מאב אם.', count: 2 });
+  assert.deepEqual(replaceLiteral('אב אבות מאב אב.', 'אב', 'אם', true), { text: 'אם אבות מאב אם.', count: 2, skipped: 2 });
   assert.equal(replaceLiteral('אב אבות מאב אב.', 'אב', 'אם', false).count, 4);
-  assert.deepEqual(replaceLiteral('𐤀אב אב𐤀 אב', 'אב', 'אם', true), { text: '𐤀אב אב𐤀 אם', count: 1 });
+  assert.deepEqual(replaceLiteral('𐤀אב אב𐤀 אב', 'אב', 'אם', true), { text: '𐤀אב אב𐤀 אם', count: 1, skipped: 2 });
 });
 test('QA replacement: query punctuation and replacement dollar tokens are literal', () => {
-  assert.deepEqual(replaceLiteral('אב אב', 'אב', '$& $$', true), { text: '$& $$ $& $$', count: 2 });
-  assert.deepEqual(replaceLiteral('[אב] [אב]', '[', 'X', false), { text: 'Xאב] Xאב]', count: 2 });
+  assert.deepEqual(replaceLiteral('אב אב', 'אב', '$& $$', true), { text: '$& $$ $& $$', count: 2, skipped: 0 });
+  assert.deepEqual(replaceLiteral('[אב] [אב]', '[', 'X', false), { text: 'Xאב] Xאב]', count: 2, skipped: 0 });
 });
 test('QA replacement: planning preserves unrelated edits and does not mutate its input', () => {
   const book = bookOf(['אב אב', 'שמור', '<b>אב</b>']);
@@ -108,4 +108,26 @@ test('QA replacement: plugin storage failure after restore preserves the recover
   assert.equal((await p.latest()).changes[0].proposedText, 'אם');
   assert.equal(p.host.drafts.get('d-id:1').changes[0].proposedText, 'אם');
   assert.equal(p.host.acks.length, 0);
+});
+
+test('regression: every occurrence is replaced, with or without nikud in the book', async () => {
+  const { replaceLiteral } = await import('../../plugin/find-replace.js');
+  const text = 'שלום עולם, שָׁלוֹם וגם שלום. שָׁלוֹמוֹ';
+  const result = replaceLiteral(text, 'שלום', 'x');
+  assert.equal(result.count, 3);
+  assert.equal(result.text, 'x עולם, x וגם x. שָׁלוֹמוֹ');
+  // A query with nikud stays exact.
+  assert.equal(replaceLiteral(text, 'שָׁלוֹם', 'x').count, 1);
+  assert.equal(replaceLiteral('אָבגאבג', 'אבג', 'x', false).text, 'xx');
+});
+
+test('regression: matches inside longer words are counted as skipped, not silently ignored', () => {
+  const result = replaceLiteral('שלום ושלום לשלום', 'שלום', 'x');
+  assert.equal(result.count, 1);
+  assert.equal(result.skipped, 2);
+  assert.equal(replaceLiteral('שלום ושלום', 'שלום', 'x', false).count, 2);
+  const plan = planReplacements(bookOf(['שלום ושלום']), { sessionId: 's', bookUid: 'id:1', bookId: 'ספר', libraryVersion: '1', revision: 1, changes: [] },
+    { query: 'שלום', replacement: 'x' });
+  assert.equal(plan.occurrences, 1);
+  assert.equal(plan.skipped, 1);
 });

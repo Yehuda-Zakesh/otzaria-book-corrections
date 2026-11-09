@@ -31,25 +31,44 @@ function replacementWordAt(text, index) {
   return replaceWordCharacter.test(String.fromCodePoint(text.codePointAt(index)));
 }
 
-export function replaceLiteral(text, query, replacement, wholeWords = true, { maxLength = Infinity } = {}) {
+// Hebrew points and cantillation marks. A query typed without them matches the
+// same word whether or not the book is vocalized; a query with them is exact.
+const nikudMark = /[֑-ׇֽֿׁׂׅׄ]/;
+function withoutNikud(text) {
+  let stripped = '';
+  const map = [];
+  for (let i = 0; i < text.length; i++) if (!nikudMark.test(text[i])) { stripped += text[i]; map.push(i); }
+  return { stripped, map };
+}
+
+export function replaceLiteral(text, query, replacement, wholeWords = true, { maxLength = Infinity, ignoreNikud = true } = {}) {
   if (!query) replacementFailure('כתבו מילה או ביטוי לחיפוש.');
-  let from = 0, count = 0, length = text.length;
+  const view = ignoreNikud && !nikudMark.test(query) && nikudMark.test(text) ? withoutNikud(text) : null;
+  const haystack = view ? view.stripped : text;
+  let from = 0, count = 0, skipped = 0, length = text.length;
   const pieces = [];
-  for (let at = text.indexOf(query); at >= 0; at = text.indexOf(query, from)) {
-    const end = at + query.length;
+  for (let found = haystack.indexOf(query); found >= 0;) {
+    let at = found, end = found + query.length;
+    if (view) {
+      at = view.map[found]; end = view.map[found + query.length - 1] + 1;
+      // The marks of the last matched letter belong to the match.
+      while (end < text.length && nikudMark.test(text[end])) end++;
+    }
     const boundary = !wholeWords ||
-      ((!replacementWordAt(query, 0) || !replacementWordAt(text, at - 1)) &&
-       (!replacementWordAt(query, query.length - 1) || !replacementWordAt(text, end)));
+      ((!replacementWordAt(text, at) || !replacementWordAt(text, at - 1)) &&
+       (!replacementWordAt(text, end - 1) || !replacementWordAt(text, end)));
     if (boundary) {
-      length += replacement.length - query.length;
+      length += replacement.length - (end - at);
       if (length > maxLength) replacementFailure('נוסח ההחלפה יוצר פסקה ארוכה מהמותר. לא נעשה שינוי.', 'limit_exceeded');
       count++;
     }
-    pieces.push(text.slice(from, at), boundary ? replacement : query);
+    if (!boundary) skipped++;
+    pieces.push(text.slice(from, at), boundary ? replacement : text.slice(at, end));
     from = end;
+    found = view ? haystack.indexOf(query, found + query.length) : haystack.indexOf(query, from);
   }
   pieces.push(text.slice(from));
-  return { text: pieces.join(''), count };
+  return { text: pieces.join(''), count, skipped };
 }
 
 export function planReplacements(book, snapshot, { query, replacement, wholeWords = true }) {
@@ -69,10 +88,11 @@ export function planReplacements(book, snapshot, { query, replacement, wholeWord
   }
   const previews = [];
   const limits = snapshot.capabilities ?? {};
-  let occurrences = 0;
+  let occurrences = 0, skipped = 0;
   for (const section of book.sections) {
     const before = current.get(section.index)?.proposedText ?? section.text;
     const result = replaceLiteral(before, query, replacement, wholeWords, { maxLength: limits.maxTextLength ?? 20000 });
+    skipped += result.skipped;
     if (!result.count || result.text === before) continue;
     occurrences += result.count;
     previews.push({ sectionIndex: section.index, originalText: before, proposedText: result.text,
@@ -94,5 +114,5 @@ export function planReplacements(book, snapshot, { query, replacement, wholeWord
   }
   if (bytes > (limits.maxChangesBytes ?? 1048576)) replacementFailure('ההחלפה חורגת מגודל הטיוטה המותר. לא נעשה שינוי.', 'limit_exceeded');
   return { sessionId: snapshot.sessionId, bookUid: snapshot.bookUid, bookId: snapshot.bookId,
-    libraryVersion: snapshot.libraryVersion, revision: snapshot.revision, query, replacement, wholeWords, occurrences, previews, changes };
+    libraryVersion: snapshot.libraryVersion, revision: snapshot.revision, query, replacement, wholeWords, occurrences, skipped, previews, changes };
 }

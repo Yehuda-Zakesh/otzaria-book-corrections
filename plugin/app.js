@@ -158,7 +158,7 @@ function renderReplace() {
   for (const id of ['replace-session', 'replace-query', 'replace-with', 'replace-whole-words']) el(id).disabled = busy || !active.length;
   el('replace-preview').disabled = busy || !active.length || !String(el('replace-query').value ?? '');
   el('replace-apply').disabled = busy || !replacePlan?.occurrences;
-  el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.` :
+  el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.${replacePlan.skipped ? ` ${replacePlan.skipped} התאמות בתוך מילים ארוכות יותר לא יוחלפו (מילים שלמות בלבד).` : ''}` :
     replaceNotice || (active.length ? 'הציגו התאמות כדי לבדוק את הנוסח לפני ההחלפה.' : 'התחילו קודם עריכה של ספר בקורא כדי לחפש ולהחליף בו.');
   if (renderedReplacePlan !== replacePlan) {
     el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
@@ -186,7 +186,9 @@ async function previewReplacement() {
 async function applyReplacement() {
   const plan = replacePlan;
   if (!plan?.occurrences) throw new Error('הציגו התאמות לפני החלפה.');
-  if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.`)) return;
+  if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.${plan.skipped ? `
+
+${plan.skipped} התאמות בתוך מילים ארוכות יותר (למשל עם תחילית) לא יוחלפו. כדי להחליף גם אותן, בטלו את „מילים שלמות בלבד”.` : ''}`)) return;
   replacePlan = null;
   let result;
   try { result = await controller.applyReplacements(plan); }
@@ -290,11 +292,14 @@ async function beginFor(tabId) {
 }
 const sameBook = (tab, event) => {
   const uid = event.bookUid ?? event.selection?.bookUid ?? (event.currentId != null ? `id:${event.currentId}` : null);
-  return uid ? tab.bookUid === uid || (tab.id != null && `id:${tab.id}` === uid) : tab.bookId === (event.currentBookId ?? event.currentBook);
+  return uid ? tab.bookUid === uid || (tab.id != null && `id:${tab.id}` === uid) : tab.bookId === (event.currentBookId ?? event.currentBook ?? event.selection?.bookId);
 };
 // Toolbar clicks carry no tabId (host gap); only an unambiguous tab is used.
 async function tabForToolbar(event) {
   const current = await call('reader.getCurrentState');
+  const named = event.bookUid ?? event.selection?.bookUid ?? event.currentId ?? event.currentBookId ?? event.currentBook ?? event.selection?.bookId;
+  // No book named by the click: the book in front is the one that was clicked.
+  if (current?.currentTabId && named == null && current.currentType === 'text') return current.currentTabId;
   if (current?.currentTabId && sameBook({ bookUid: current.bookUid, id: current.currentId, bookId: current.currentBookId }, event)) return current.currentTabId;
   const candidates = (current?.openTabs ?? []).filter(tab => tab.tabId && sameBook(tab, event));
   if (candidates.length === 1) return candidates[0].tabId;
@@ -321,7 +326,9 @@ function requestEdit(event, fromToolbar) {
       await sendItems(bookUid, pending.map(item => item.sectionIndex));
       return;
     }
-    const tabId = event.selection?.tabId ?? event.tabId ?? (fromToolbar || !event.selection ? await tabForToolbar(event) : null);
+    // A context-menu click usually carries the book but no tabId (host gap):
+    // resolve it exactly as a toolbar click does instead of giving up.
+    const tabId = event.selection?.tabId ?? event.tabId ?? await tabForToolbar(event);
     if (!tabId) throw new Error('לא זוהתה לשונית הספר. לחצו לחיצה ימנית בתוך הספר ובחרו „תיקון הספר בקורא”.');
     await beginFor(tabId);
   })).catch(error => notify(errorText(error), true));
@@ -356,6 +363,11 @@ async function sendItems(bookUid, keys) {
     queue = (book?.pending ?? []).filter(candidate => keys.includes(candidate.sectionIndex));
   };
   await load();
+  if (!queue.length) {
+    // Nothing to send: say so (everything may already be sent or dismissed).
+    notify('אין תיקונים ממתינים לשליחה — כל התיקונים בספר כבר נשלחו, נשמרו בתור של אוצריא או נמחקו.');
+    return;
+  }
   for (;;) {
     const item = queue.shift();
     if (!item) break;

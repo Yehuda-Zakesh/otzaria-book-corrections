@@ -1304,7 +1304,9 @@ function diffHunks(before, after) {
  * Returns null when two proposals touch the same words (or insert at the
  * same point): the user must then decide, nothing is guessed. */
 function mergeProposals(original, proposals) {
-  const hunks = proposals.flatMap(proposed => diffHunks(original, proposed)).sort((a, b) => a.start - b.start || a.end - b.end);
+  const all = proposals.flatMap(proposed => diffHunks(original, proposed)).sort((a, b) => a.start - b.start || a.end - b.end);
+  // Two proposals making the very same edit are not a conflict.
+  const hunks = all.filter((hunk, i) => !(i && all[i - 1].start === hunk.start && all[i - 1].end === hunk.end && all[i - 1].insert === hunk.insert));
   for (let i = 1; i < hunks.length; i++) {
     const previous = hunks[i - 1], hunk = hunks[i];
     if (hunk.start < previous.end || hunk.start === previous.start) return null;
@@ -1577,25 +1579,44 @@ function replacementWordAt(text, index) {
   return replaceWordCharacter.test(String.fromCodePoint(text.codePointAt(index)));
 }
 
-function replaceLiteral(text, query, replacement, wholeWords = true, { maxLength = Infinity } = {}) {
+// Hebrew points and cantillation marks. A query typed without them matches the
+// same word whether or not the book is vocalized; a query with them is exact.
+const nikudMark = /[֑-ׇֽֿׁׂׅׄ]/;
+function withoutNikud(text) {
+  let stripped = '';
+  const map = [];
+  for (let i = 0; i < text.length; i++) if (!nikudMark.test(text[i])) { stripped += text[i]; map.push(i); }
+  return { stripped, map };
+}
+
+function replaceLiteral(text, query, replacement, wholeWords = true, { maxLength = Infinity, ignoreNikud = true } = {}) {
   if (!query) replacementFailure('כתבו מילה או ביטוי לחיפוש.');
-  let from = 0, count = 0, length = text.length;
+  const view = ignoreNikud && !nikudMark.test(query) && nikudMark.test(text) ? withoutNikud(text) : null;
+  const haystack = view ? view.stripped : text;
+  let from = 0, count = 0, skipped = 0, length = text.length;
   const pieces = [];
-  for (let at = text.indexOf(query); at >= 0; at = text.indexOf(query, from)) {
-    const end = at + query.length;
+  for (let found = haystack.indexOf(query); found >= 0;) {
+    let at = found, end = found + query.length;
+    if (view) {
+      at = view.map[found]; end = view.map[found + query.length - 1] + 1;
+      // The marks of the last matched letter belong to the match.
+      while (end < text.length && nikudMark.test(text[end])) end++;
+    }
     const boundary = !wholeWords ||
-      ((!replacementWordAt(query, 0) || !replacementWordAt(text, at - 1)) &&
-       (!replacementWordAt(query, query.length - 1) || !replacementWordAt(text, end)));
+      ((!replacementWordAt(text, at) || !replacementWordAt(text, at - 1)) &&
+       (!replacementWordAt(text, end - 1) || !replacementWordAt(text, end)));
     if (boundary) {
-      length += replacement.length - query.length;
+      length += replacement.length - (end - at);
       if (length > maxLength) replacementFailure('נוסח ההחלפה יוצר פסקה ארוכה מהמותר. לא נעשה שינוי.', 'limit_exceeded');
       count++;
     }
-    pieces.push(text.slice(from, at), boundary ? replacement : query);
+    if (!boundary) skipped++;
+    pieces.push(text.slice(from, at), boundary ? replacement : text.slice(at, end));
     from = end;
+    found = view ? haystack.indexOf(query, found + query.length) : haystack.indexOf(query, from);
   }
   pieces.push(text.slice(from));
-  return { text: pieces.join(''), count };
+  return { text: pieces.join(''), count, skipped };
 }
 
 function planReplacements(book, snapshot, { query, replacement, wholeWords = true }) {
@@ -1615,10 +1636,11 @@ function planReplacements(book, snapshot, { query, replacement, wholeWords = tru
   }
   const previews = [];
   const limits = snapshot.capabilities ?? {};
-  let occurrences = 0;
+  let occurrences = 0, skipped = 0;
   for (const section of book.sections) {
     const before = current.get(section.index)?.proposedText ?? section.text;
     const result = replaceLiteral(before, query, replacement, wholeWords, { maxLength: limits.maxTextLength ?? 20000 });
+    skipped += result.skipped;
     if (!result.count || result.text === before) continue;
     occurrences += result.count;
     previews.push({ sectionIndex: section.index, originalText: before, proposedText: result.text,
@@ -1640,7 +1662,7 @@ function planReplacements(book, snapshot, { query, replacement, wholeWords = tru
   }
   if (bytes > (limits.maxChangesBytes ?? 1048576)) replacementFailure('ההחלפה חורגת מגודל הטיוטה המותר. לא נעשה שינוי.', 'limit_exceeded');
   return { sessionId: snapshot.sessionId, bookUid: snapshot.bookUid, bookId: snapshot.bookId,
-    libraryVersion: snapshot.libraryVersion, revision: snapshot.revision, query, replacement, wholeWords, occurrences, previews, changes };
+    libraryVersion: snapshot.libraryVersion, revision: snapshot.revision, query, replacement, wholeWords, occurrences, skipped, previews, changes };
 }
 
 
@@ -1708,7 +1730,9 @@ function createReaderReplacement({ call, controller, loader, confirm, notify,
         if (!plan.occurrences) { notify('לא נמצאו התאמות מדויקות להחלפה. לא נעשה שינוי.'); return; }
         if (!same(await context(), request)) throw new Error('הספר או הלשונית השתנו. לא נעשה שינוי.');
         check();
-        if (!await confirm('החלפת כל ההתאמות בספר', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש מדויק של מילים שלמות: ${plan.query.slice(0, 200)}\nהחלפה: ${event.text ? event.text.slice(0, 200) : '(מחיקה)'}\n\nהנוסח יעודכן בטיוטת הקורא בלבד. דיווחים לא יישלחו.`)) {
+        if (!await confirm('החלפת כל ההתאמות בספר', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש מדויק של מילים שלמות: ${plan.query.slice(0, 200)}\nהחלפה: ${event.text ? event.text.slice(0, 200) : '(מחיקה)'}\n\nהנוסח יעודכן בטיוטת הקורא בלבד. דיווחים לא יישלחו.${plan.skipped ? `
+
+${plan.skipped} התאמות בתוך מילים ארוכות יותר (למשל עם תחילית) לא יוחלפו.` : ''}`)) {
           notify('ההחלפה בוטלה. לא נעשה שינוי.'); return;
         }
         check();
@@ -1918,7 +1942,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
     },
     async exportText() {
       await api.flush();
-      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.1', schema: 1,
+      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.2', schema: 1,
         persistenceFailed, filesAvailable, instances: await records() }, null, 2);
     },
     async files() {
@@ -1943,7 +1967,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
       await api.flush();
       const all = await records();
       const counts = [...counters].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([m, count]) => `${m}=${count}`).join(',');
-      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.1 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
+      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.2 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
       const recent = all.flatMap(r => r.entries.map(e => ({ ...e, instance: r.id }))).sort((a, b) => a.at - b.at);
       const errors = recent.filter(e => /error|failed/.test(e.event)).slice(-3);
       let output = details + header;
@@ -2109,7 +2133,7 @@ function renderReplace() {
   for (const id of ['replace-session', 'replace-query', 'replace-with', 'replace-whole-words']) el(id).disabled = busy || !active.length;
   el('replace-preview').disabled = busy || !active.length || !String(el('replace-query').value ?? '');
   el('replace-apply').disabled = busy || !replacePlan?.occurrences;
-  el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.` :
+  el('replace-summary').textContent = replacePlan ? `${replacePlan.occurrences} התאמות ב־${replacePlan.previews.length} פסקאות בספר „${replacePlan.bookId}”.${replacePlan.skipped ? ` ${replacePlan.skipped} התאמות בתוך מילים ארוכות יותר לא יוחלפו (מילים שלמות בלבד).` : ''}` :
     replaceNotice || (active.length ? 'הציגו התאמות כדי לבדוק את הנוסח לפני ההחלפה.' : 'התחילו קודם עריכה של ספר בקורא כדי לחפש ולהחליף בו.');
   if (renderedReplacePlan !== replacePlan) {
     el('replace-results').replaceChildren(...(replacePlan?.previews ?? []).slice(0, 20).map(changeView));
@@ -2137,7 +2161,9 @@ async function previewReplacement() {
 async function applyReplacement() {
   const plan = replacePlan;
   if (!plan?.occurrences) throw new Error('הציגו התאמות לפני החלפה.');
-  if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.`)) return;
+  if (!await confirm('החלפת כל ההתאמות', `להחליף ${plan.occurrences} התאמות ב־${plan.previews.length} פסקאות בספר „${plan.bookId}”?\n\nחיפוש: ${plan.query.slice(0, 200)}\nהחלפה: ${plan.replacement ? plan.replacement.slice(0, 200) : '(מחיקה)'}\n\nההצעות יעודכנו בקורא; שליחתן לבדיקה נעשית בנפרד.${plan.skipped ? `
+
+${plan.skipped} התאמות בתוך מילים ארוכות יותר (למשל עם תחילית) לא יוחלפו. כדי להחליף גם אותן, בטלו את „מילים שלמות בלבד”.` : ''}`)) return;
   replacePlan = null;
   let result;
   try { result = await controller.applyReplacements(plan); }
@@ -2241,11 +2267,14 @@ async function beginFor(tabId) {
 }
 const sameBook = (tab, event) => {
   const uid = event.bookUid ?? event.selection?.bookUid ?? (event.currentId != null ? `id:${event.currentId}` : null);
-  return uid ? tab.bookUid === uid || (tab.id != null && `id:${tab.id}` === uid) : tab.bookId === (event.currentBookId ?? event.currentBook);
+  return uid ? tab.bookUid === uid || (tab.id != null && `id:${tab.id}` === uid) : tab.bookId === (event.currentBookId ?? event.currentBook ?? event.selection?.bookId);
 };
 // Toolbar clicks carry no tabId (host gap); only an unambiguous tab is used.
 async function tabForToolbar(event) {
   const current = await call('reader.getCurrentState');
+  const named = event.bookUid ?? event.selection?.bookUid ?? event.currentId ?? event.currentBookId ?? event.currentBook ?? event.selection?.bookId;
+  // No book named by the click: the book in front is the one that was clicked.
+  if (current?.currentTabId && named == null && current.currentType === 'text') return current.currentTabId;
   if (current?.currentTabId && sameBook({ bookUid: current.bookUid, id: current.currentId, bookId: current.currentBookId }, event)) return current.currentTabId;
   const candidates = (current?.openTabs ?? []).filter(tab => tab.tabId && sameBook(tab, event));
   if (candidates.length === 1) return candidates[0].tabId;
@@ -2272,7 +2301,9 @@ function requestEdit(event, fromToolbar) {
       await sendItems(bookUid, pending.map(item => item.sectionIndex));
       return;
     }
-    const tabId = event.selection?.tabId ?? event.tabId ?? (fromToolbar || !event.selection ? await tabForToolbar(event) : null);
+    // A context-menu click usually carries the book but no tabId (host gap):
+    // resolve it exactly as a toolbar click does instead of giving up.
+    const tabId = event.selection?.tabId ?? event.tabId ?? await tabForToolbar(event);
     if (!tabId) throw new Error('לא זוהתה לשונית הספר. לחצו לחיצה ימנית בתוך הספר ובחרו „תיקון הספר בקורא”.');
     await beginFor(tabId);
   })).catch(error => notify(errorText(error), true));
@@ -2307,6 +2338,11 @@ async function sendItems(bookUid, keys) {
     queue = (book?.pending ?? []).filter(candidate => keys.includes(candidate.sectionIndex));
   };
   await load();
+  if (!queue.length) {
+    // Nothing to send: say so (everything may already be sent or dismissed).
+    notify('אין תיקונים ממתינים לשליחה — כל התיקונים בספר כבר נשלחו, נשמרו בתור של אוצריא או נמחקו.');
+    return;
+  }
   for (;;) {
     const item = queue.shift();
     if (!item) break;
