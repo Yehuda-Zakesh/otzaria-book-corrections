@@ -124,3 +124,8 @@ test('a changed source blocks sending and keeps the proposal', async () => {
   assert.equal((await submitItem({ call, store, book, item: book.pending[0] })).status, 'source_changed');
   assert.equal((await reload(store)).pending.length, 1);
 });
+
+test('a paragraph split (line break in the proposal) is carried to the host unchanged', () => {
+  const range = correctionRange({ originalText: 'אבג דהו', originalSourceText: 'אבג דהו', proposedText: 'אבג\nדהו' });
+  assert.deepEqual(range, { sourceStart: 3, sourceEnd: 4, original: ' ', proposed: '\n' });
+});
