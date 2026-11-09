@@ -131,6 +131,10 @@ test('sending from the page uses requireTextCorrection and shows queued honestly
   assert.equal(submission.params.requireTextCorrection, true);
   assert.match(page.el('status').textContent, /בתור של אוצריא וטרם נשלחו לאתר/);
   await waitFor(() => /טרם נשלח לאתר/.test(page.el('history-list').allText), 'queued history');
+  // Otzaria's own queue sends it later; the label follows when the page is resumed.
+  host.deliverQueue();
+  await page.emit('plugin.resumed', {});
+  await waitFor(() => !/טרם נשלח לאתר/.test(page.el('history-list').allText) && /נשלח מהתור של אוצריא/.test(page.el('history-list').allText), 'history updated after the queue sent it');
 });
 
 test('regression: a context-menu click without selection.tabId resolves the tab of its book', async () => {

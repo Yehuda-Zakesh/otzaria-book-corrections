@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "org.otzaria.community.book-corrections",
   "name": "תיקוני ספרים",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "stability": "experimental",
   "description": "תיקון נוסח הספר בקורא של אוצריא, שמירת התיקונים ושליחתם כדיווחי שגיאות.",
   "author": "Yehuda-Zakesh",

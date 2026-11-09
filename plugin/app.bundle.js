@@ -1107,6 +1107,8 @@ function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
+  // Sent later by Otzaria's own queue: the host only confirms that it was sent.
+  if (result.fromQueue) return 'נשלח מהתור של אוצריא — סטטוס הטיפול באתר אינו ידוע';
   if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי לבדיקה ידנית — סטטוס הטיפול אינו ידוע';
   if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';
@@ -1805,6 +1807,52 @@ function createSendVisibility(call) {
   } };
 }
 
+
+// A report Otzaria queued (offline) is sent later by Otzaria's own queue; the
+// plugin is not told. Ask the host (feedback.getBookCorrectionStatus, 0.9.99)
+// and upgrade queued records to sent. Anything unclear leaves the record as it
+// is: the label never claims more than the host confirmed.
+const MAX_PER_ROUND = 20;
+const unsupportedCodes = new Set(['unknown_method', 'method_not_found', 'not_supported', 'unsupported', 'not_implemented', 'permission_denied']);
+
+function queuedReports(state) {
+  const found = [];
+  for (const book of state?.books?.values?.() ?? []) {
+    for (const [itemKey, list] of book.resolutions ?? []) {
+      if (list.some(record => record.status === 'sent')) continue;
+      const queued = list.find(record => record.status === 'queued');
+      const reportId = queued?.result?.reportId;
+      if (typeof reportId === 'string' && reportId) found.push({ bookUid: book.bookUid, itemKey, reportId, record: queued });
+    }
+  }
+  return found.sort((a, b) => (a.record.at ?? 0) - (b.record.at ?? 0));
+}
+
+const isUnsupported = error => unsupportedCodes.has(codeOf(error)) ||
+  /unknown method|method not found|not supported|unsupported/i.test(String(error?.message ?? ''));
+
+/** Returns how many records were upgraded to sent. `supported` goes false when
+ * the host has no such method, and the caller then stops asking. */
+async function refreshQueuedStatuses({ call, store, state }) {
+  const result = { sent: 0, supported: true };
+  for (const { bookUid, itemKey, reportId, record } of queuedReports(state).slice(0, MAX_PER_ROUND)) {
+    let answer;
+    try { answer = await call('feedback.getBookCorrectionStatus', { reportId }); }
+    catch (error) {
+      if (isUnsupported(error)) { result.supported = false; return result; }
+      continue; // transient: asked again next round
+    }
+    if (answer?.status !== 'sent') continue; // queued / rejected / unknown: no change
+    const sent = { ...record.result, status: 'sent', nativeReportId: answer.nativeReportId ?? record.result.nativeReportId ?? null,
+      duplicate: false, fromQueue: true };
+    await store.recordSubmission(bookUid, itemKey, reportId, 'sent', { result: sent });
+    await store.resolve(bookUid, itemKey, 'sent', { result: sent, sectionIndex: record.sectionIndex, originalText: record.originalText,
+      originalSourceText: record.originalSourceText, proposedText: record.proposedText, title: record.title ?? null });
+    result.sent++;
+  }
+  return result;
+}
+
 // Deliberately records metadata only. Never pass RPC arguments, book text,
 // report wording or arbitrary exception messages into the persisted log.
 const LOG_PREFIX = 'logs:v1:';
@@ -1942,7 +1990,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
     },
     async exportText() {
       await api.flush();
-      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.2', schema: 1,
+      return JSON.stringify({ plugin: 'book-corrections', version: '0.3.3', schema: 1,
         persistenceFailed, filesAvailable, instances: await records() }, null, 2);
     },
     async files() {
@@ -1967,7 +2015,7 @@ function createDiagnostics(rawCall, { now = () => Date.now(),
       await api.flush();
       const all = await records();
       const counts = [...counters].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([m, count]) => `${m}=${count}`).join(',');
-      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.2 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
+      const header = `\n\n--- Plugin diagnostics v1 / book-corrections 0.3.3 ---\ninstance=${id}; persistenceFailed=${persistenceFailed}; filesAvailable=${filesAvailable}\nRPC counts: ${counts}\n`;
       const recent = all.flatMap(r => r.entries.map(e => ({ ...e, instance: r.id }))).sort((a, b) => a.at - b.at);
       const errors = recent.filter(e => /error|failed/.test(e.event)).slice(-3);
       let output = details + header;
@@ -2007,7 +2055,7 @@ const marks = createReaderMarks(call);
 const sendVisibility = createSendVisibility(call);
 const replacementBooks = createReplacementBookLoader(call);
 let replacePlan = null, replaceNotice = '';
-let marksOn = true, highlightGranted = true, refCheck = 0;
+let marksOn = true, highlightGranted = true, refCheck = 0, queuedCheck = 0, queuedUnsupported = false;
 const reasons = {
   source_changed: 'המקור השתנה מאז התיקון', not_found: 'הפסקה אינה קיימת עוד בספר',
   invalid: 'הנתונים פגומים או שההצעה אינה נתמכת', displaced: 'עריכה שלא נשמרה בחלון שאיבד את הבעלות על הספר',
@@ -2239,6 +2287,18 @@ async function checkMarks() {
   marksOn = await marksEnabled(call);
   if (!marksOn) await marks.clearAll();
   await reload();
+}
+// A report Otzaria queued while offline is sent later by Otzaria's own queue,
+// without telling the plugin: ask the host now and then and upgrade the label.
+async function refreshQueued() {
+  const now = Date.now();
+  if (queuedUnsupported || now - queuedCheck < 30000 || !queuedReports(state).length) return;
+  queuedCheck = now;
+  const result = await refreshQueuedStatuses({ call, store, state });
+  if (!result.supported) { queuedUnsupported = true; return; }
+  if (!result.sent) return;
+  await reload();
+  message(result.sent === 1 ? 'דיווח שהמתין בתור של אוצריא נשלח.' : `${result.sent} דיווחים שהמתינו בתור של אוצריא נשלחו.`, false, 6000);
 }
 async function refreshTabs() {
   const current = await call('reader.getCurrentState').catch(() => null);
@@ -2696,6 +2756,7 @@ async function initializePage(boot) {
     message('כדי ש„תיקון הספר בקורא” יפתח את העריכה בלי לעבור לדף התוסף, אשרו לתוסף בניהול התוספים את ההרשאה להפעלה ברקע.');
   }
   await reload();
+  refreshQueued().catch(error => diagnostics.error('queued.error', error));
   await refreshTabs();
   const report = await controller.recoverOrphans().catch(error => { message(errorText(error), true); return null; });
   if (report?.saved) message(`נקלטו ${report.saved} טיוטות שנשמרו באוצריא מעריכה קודמת.`, false, 6000);
@@ -2758,8 +2819,8 @@ if (host) {
   // Session events queue behind boot; nothing is acknowledged before saving.
   onHost('reader.correctionSessionChanged', event => { afterBoot(() => controller.changed(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
   onHost('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
-  onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); });
-  onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); });
+  onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
+  onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
   onHost('search.fieldAction.invoked', event => { afterBoot(() => run(() => readerReplacement.invoked(event))).catch(error => notify(errorText(error), true)); });
   onHost('search.fieldAction.stopRequested', event => { afterBoot(() => readerReplacement.stop(event)).catch(error => notify(errorText(error), true)); });
   onHost('search.fieldAction.ended', event => readerReplacement.ended(event));
@@ -2768,6 +2829,12 @@ if (host) {
 } else message('יש לפתוח את התוסף מתוך אוצריא.');
 window.addEventListener?.('error', event => { diagnostics.error('javascript.error', event.error); diagnostics.flush(); });
 window.addEventListener?.('unhandledrejection', event => { diagnostics.error('promise.error', event.reason); diagnostics.flush(); });
-document.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') diagnostics.flush(); });
+document.addEventListener?.('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') diagnostics.flush();
+  else if (host) afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error));
+});
+window.addEventListener?.('focus', () => { if (host) afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
+// A visible page also checks once a minute while a report is still queued.
+if (host && typeof setInterval === 'function') setInterval(() => { if (document.visibilityState === 'visible') afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); }, 60000);
 
 })();

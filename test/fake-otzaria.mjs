@@ -159,14 +159,23 @@ export function createFakeOtzaria({ books = { 'id:1': { bookId: 'ספר', lines:
       if (params.requireTextCorrection && host.textCorrectionUnavailable) throw fail('text_correction_unavailable');
       if (host.submitFails) throw fail(host.submitFails);
       const status = host.submitMode;
-      host.submissions.set(params.reportId, { content, params, count: (previous?.count ?? 0) + 1 });
+      host.submissions.set(params.reportId, { content, params, count: (previous?.count ?? 0) + 1, sentNow: status === 'sent' });
       if (host.loseSubmitResponse) { host.loseSubmitResponse = false; throw fail('timeout', 'response lost'); }
       return { status, reportId: params.reportId, nativeReportId: `n-${params.reportId}`, message: '', duplicate: !!previous,
         reportKind: params.requireTextCorrection || !params.forceFreeText ? 'text_correction' : 'free_text',
         correctionSupported: status === 'sent' ? true : null };
     },
+    // Otzaria's own queue sends a queued report later; host.deliverQueue() models it.
+    'feedback.getBookCorrectionStatus'({ reportId }) {
+      if (host.statusUnsupported) throw fail('unknown_method', 'Unknown action in feedback');
+      if (host.statusFails) throw fail(host.statusFails);
+      const submission = host.submissions.get(reportId);
+      if (!submission) return { status: 'unknown', reportId, nativeReportId: `n-${reportId}` };
+      return { status: submission.delivered || submission.sentNow ? 'sent' : 'queued', reportId, nativeReportId: `n-${reportId}` };
+    },
     'feedback.hasReporterEmail'() { return { hasEmail: true }; }
   };
+  host.deliverQueue = () => { for (const submission of host.submissions.values()) submission.delivered = true; };
   host.instance = storage => async (method, args = {}) => {
     host.calls.push(method);
     if (method.startsWith('storage.')) return storage.call(method, args);

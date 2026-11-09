@@ -62,6 +62,8 @@ export function deliveryLabel(record) {
   const result = record?.result ?? record;
   if (!result?.status) return null;
   if (result.status === 'queued') return 'בתור הדיווחים של אוצריא — טרם נשלח לאתר';
+  // Sent later by Otzaria's own queue: the host only confirms that it was sent.
+  if (result.fromQueue) return 'נשלח מהתור של אוצריא — סטטוס הטיפול באתר אינו ידוע';
   if (result.reportKind === 'free_text') return 'נשלח כדיווח חופשי לבדיקה ידנית — סטטוס הטיפול אינו ידוע';
   if (result.correctionSupported === true) return 'השליחה דרך אוצריא הושלמה — סטטוס הטיפול באתר אינו ידוע';
   return 'נשלח, אך האתר לא אישר קליטה כתיקון מובנה';

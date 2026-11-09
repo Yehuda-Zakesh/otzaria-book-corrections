@@ -11,6 +11,7 @@ import { planReplacements, createReplacementBookLoader } from './find-replace.js
 import { createSendVisibility } from './send-visibility.js';
 import { createDiagnostics } from './diagnostics.js';
 import { createReaderReplacement } from './reader-replace.js';
+import { queuedReports, refreshQueuedStatuses } from './queued-status.js';
 const el = id => document.getElementById(id), host = window.Otzaria;
 let diagnostics;
 const rawCall = host ? createRpcCall(host, { onRetry: data => diagnostics?.record('rpc.retry', data) }) : async () => { throw new Error('יש לפתוח את התוסף מתוך אוצריא.'); };
@@ -32,7 +33,7 @@ const marks = createReaderMarks(call);
 const sendVisibility = createSendVisibility(call);
 const replacementBooks = createReplacementBookLoader(call);
 let replacePlan = null, replaceNotice = '';
-let marksOn = true, highlightGranted = true, refCheck = 0;
+let marksOn = true, highlightGranted = true, refCheck = 0, queuedCheck = 0, queuedUnsupported = false;
 const reasons = {
   source_changed: 'המקור השתנה מאז התיקון', not_found: 'הפסקה אינה קיימת עוד בספר',
   invalid: 'הנתונים פגומים או שההצעה אינה נתמכת', displaced: 'עריכה שלא נשמרה בחלון שאיבד את הבעלות על הספר',
@@ -264,6 +265,18 @@ async function checkMarks() {
   marksOn = await marksEnabled(call);
   if (!marksOn) await marks.clearAll();
   await reload();
+}
+// A report Otzaria queued while offline is sent later by Otzaria's own queue,
+// without telling the plugin: ask the host now and then and upgrade the label.
+async function refreshQueued() {
+  const now = Date.now();
+  if (queuedUnsupported || now - queuedCheck < 30000 || !queuedReports(state).length) return;
+  queuedCheck = now;
+  const result = await refreshQueuedStatuses({ call, store, state });
+  if (!result.supported) { queuedUnsupported = true; return; }
+  if (!result.sent) return;
+  await reload();
+  message(result.sent === 1 ? 'דיווח שהמתין בתור של אוצריא נשלח.' : `${result.sent} דיווחים שהמתינו בתור של אוצריא נשלחו.`, false, 6000);
 }
 async function refreshTabs() {
   const current = await call('reader.getCurrentState').catch(() => null);
@@ -721,6 +734,7 @@ async function initializePage(boot) {
     message('כדי ש„תיקון הספר בקורא” יפתח את העריכה בלי לעבור לדף התוסף, אשרו לתוסף בניהול התוספים את ההרשאה להפעלה ברקע.');
   }
   await reload();
+  refreshQueued().catch(error => diagnostics.error('queued.error', error));
   await refreshTabs();
   const report = await controller.recoverOrphans().catch(error => { message(errorText(error), true); return null; });
   if (report?.saved) message(`נקלטו ${report.saved} טיוטות שנשמרו באוצריא מעריכה קודמת.`, false, 6000);
@@ -783,8 +797,8 @@ if (host) {
   // Session events queue behind boot; nothing is acknowledged before saving.
   onHost('reader.correctionSessionChanged', event => { afterBoot(() => controller.changed(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
   onHost('reader.correctionSessionEnded', event => { afterBoot(() => controller.ended(event)).catch(error => { diagnostics.error('session.error', error); message(errorText(error), true); }); });
-  onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); });
-  onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); });
+  onHost('reader.current_ref_changed', () => { afterBoot(checkMarks).catch(error => diagnostics.error('marks.error', error)); afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
+  onHost('plugin.resumed', () => { afterBoot(() => run(refreshTabs)).catch(error => diagnostics.error('resume.error', error)); afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
   onHost('search.fieldAction.invoked', event => { afterBoot(() => run(() => readerReplacement.invoked(event))).catch(error => notify(errorText(error), true)); });
   onHost('search.fieldAction.stopRequested', event => { afterBoot(() => readerReplacement.stop(event)).catch(error => notify(errorText(error), true)); });
   onHost('search.fieldAction.ended', event => readerReplacement.ended(event));
@@ -793,4 +807,10 @@ if (host) {
 } else message('יש לפתוח את התוסף מתוך אוצריא.');
 window.addEventListener?.('error', event => { diagnostics.error('javascript.error', event.error); diagnostics.flush(); });
 window.addEventListener?.('unhandledrejection', event => { diagnostics.error('promise.error', event.reason); diagnostics.flush(); });
-document.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') diagnostics.flush(); });
+document.addEventListener?.('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') diagnostics.flush();
+  else if (host) afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error));
+});
+window.addEventListener?.('focus', () => { if (host) afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); });
+// A visible page also checks once a minute while a report is still queued.
+if (host && typeof setInterval === 'function') setInterval(() => { if (document.visibilityState === 'visible') afterBoot(refreshQueued).catch(error => diagnostics.error('queued.error', error)); }, 60000);
